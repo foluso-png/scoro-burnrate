@@ -75,7 +75,7 @@ export default function Home() {
 
   function handleProjectSelect(project: ScoroProject) {
     setSelectedProject(project);
-    const from = project.start_date || "2025-01-01";
+    const from = project.date || project.start_date || "2025-01-01";
     setDateFrom(from);
     loadData(project, from, dateTo);
   }

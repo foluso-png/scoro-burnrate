@@ -1,4 +1,5 @@
-import type { ProjectData } from "./scoro";
+import type { ProjectData, ScoroTimeEntry } from "./scoro";
+import { parseDuration } from "./scoro";
 import type { RAGStatus } from "./formatters";
 import { getRAGStatus } from "./formatters";
 
@@ -7,6 +8,20 @@ function num(value: unknown): number {
   if (value == null) return 0;
   const n = Number(value);
   return isNaN(n) ? 0 : n;
+}
+
+/** Get date from a time entry, trying real Scoro fields then demo fields. */
+function getEntryDate(entry: ScoroTimeEntry): string | null {
+  return (
+    entry.time_entry_date ||
+    entry.date ||
+    (entry.start_datetime ? entry.start_datetime.substring(0, 10) : null)
+  );
+}
+
+/** Get hours from a time entry's duration field (handles "HH:MM:SS" strings). */
+function getEntryHours(entry: ScoroTimeEntry): number {
+  return parseDuration(entry.duration);
 }
 
 export interface OverviewSummary {
@@ -67,10 +82,6 @@ export interface MonthlyBurnRate {
   rag: RAGStatus;
 }
 
-function getEntryDate(entry: { date?: string; start_date?: string; datetime?: string }): string | null {
-  return entry.date || entry.start_date || (entry.datetime ? entry.datetime.substring(0, 10) : null);
-}
-
 export function calculateOverview(data: ProjectData): OverviewSummary {
   const { timeEntries, quotes, invoices, project } = data;
 
@@ -79,15 +90,16 @@ export function calculateOverview(data: ProjectData): OverviewSummary {
   }
 
   const totalLoggedHours = timeEntries.reduce(
-    (sum, e) => sum + num(e.duration),
+    (sum, e) => sum + getEntryHours(e),
     0
   );
 
   let totalQuotedHours = 0;
   let totalQuotedValue = 0;
   for (const quote of quotes) {
-    if (quote.lines) {
-      for (const line of quote.lines) {
+    const lines = quote.lines || [];
+    if (lines.length > 0) {
+      for (const line of lines) {
         totalQuotedHours += num(line.amount);
         totalQuotedValue += num(line.sum);
       }
@@ -97,7 +109,7 @@ export function calculateOverview(data: ProjectData): OverviewSummary {
   }
 
   const totalActualCost = timeEntries.reduce(
-    (sum, e) => sum + num(e.duration) * num(e.cost_rate),
+    (sum, e) => sum + getEntryHours(e) * num(e.cost_rate),
     0
   );
 
@@ -133,14 +145,13 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
     { hours: number; value: number }
   >();
   for (const quote of quotes) {
-    if (quote.lines) {
-      for (const line of quote.lines) {
-        const key = line.comment || line.product_name || `line-${line.product_id}`;
-        const existing = quoteLookup.get(key) || { hours: 0, value: 0 };
-        existing.hours += num(line.amount);
-        existing.value += num(line.sum);
-        quoteLookup.set(key, existing);
-      }
+    const lines = quote.lines || [];
+    for (const line of lines) {
+      const key = line.comment || line.product_name || `line-${line.product_id}`;
+      const existing = quoteLookup.get(key) || { hours: 0, value: 0 };
+      existing.hours += num(line.amount);
+      existing.value += num(line.sum);
+      quoteLookup.set(key, existing);
     }
   }
 
@@ -156,7 +167,8 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
   >();
 
   for (const task of tasks) {
-    taskMap.set(task.task_id, {
+    const taskId = task.event_id || task.task_id || task.activity_id || 0;
+    taskMap.set(taskId, {
       taskName: task.event_name,
       activityId: task.activity_id,
       loggedHours: 0,
@@ -166,25 +178,31 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
   }
 
   for (const entry of timeEntries) {
-    const activityId = entry.activity_id;
-    let taskEntry = taskMap.get(activityId);
+    // Try to match by event_id first (task reference), then activity_id
+    const matchKey = entry.event_id || entry.activity_id;
+    let taskEntry = taskMap.get(matchKey);
+    if (!taskEntry && entry.activity_id !== matchKey) {
+      taskEntry = taskMap.get(entry.activity_id);
+    }
     if (!taskEntry) {
+      const name = entry.activity_name || entry.event_name || `Task ${matchKey}`;
       taskEntry = {
-        taskName: entry.activity_name || `Task ${activityId}`,
-        activityId,
+        taskName: name,
+        activityId: entry.activity_id,
         loggedHours: 0,
         actualCost: 0,
         entries: [],
       };
-      taskMap.set(activityId, taskEntry);
+      taskMap.set(matchKey, taskEntry);
     }
-    taskEntry.loggedHours += num(entry.duration);
-    taskEntry.actualCost += num(entry.duration) * num(entry.cost_rate);
+    const hours = getEntryHours(entry);
+    taskEntry.loggedHours += hours;
+    taskEntry.actualCost += hours * num(entry.cost_rate);
     taskEntry.entries.push({
       userName: entry.user_name || `User ${entry.user_id}`,
-      date: getEntryDate(entry as unknown as Record<string, string>) || "unknown",
-      duration: num(entry.duration),
-      description: entry.description,
+      date: getEntryDate(entry) || "unknown",
+      duration: hours,
+      description: entry.description || entry.title || undefined,
     });
   }
 
@@ -269,12 +287,12 @@ export function calculateByPerson(data: ProjectData): PersonBurnRate[] {
       personMap.set(userId, person);
     }
 
-    const hours = num(entry.duration);
+    const hours = getEntryHours(entry);
     const cost = hours * num(entry.cost_rate);
     person.totalHours += hours;
     person.totalCost += cost;
 
-    const taskName = entry.activity_name || `Task ${entry.activity_id}`;
+    const taskName = entry.activity_name || entry.event_name || `Task ${entry.activity_id}`;
     person.tasksWorkedOn.add(taskName);
 
     const existing = person.taskEntries.get(taskName) || {
@@ -285,7 +303,8 @@ export function calculateByPerson(data: ProjectData): PersonBurnRate[] {
     existing.cost += cost;
     person.taskEntries.set(taskName, existing);
 
-    const burnRate = taskBurnMap.get(entry.activity_id) || 0;
+    const matchKey = entry.event_id || entry.activity_id;
+    const burnRate = taskBurnMap.get(matchKey) || 0;
     if (burnRate > 0) person.burnRates.push(burnRate);
   }
 
@@ -319,10 +338,9 @@ export function calculateMonthly(data: ProjectData): MonthlyBurnRate[] {
 
   let totalQuotedHours = 0;
   for (const quote of quotes) {
-    if (quote.lines) {
-      for (const line of quote.lines) {
-        totalQuotedHours += num(line.amount);
-      }
+    const lines = quote.lines || [];
+    for (const line of lines) {
+      totalQuotedHours += num(line.amount);
     }
   }
 
@@ -332,11 +350,11 @@ export function calculateMonthly(data: ProjectData): MonthlyBurnRate[] {
   >();
 
   for (const entry of timeEntries) {
-    const date = getEntryDate(entry as unknown as Record<string, string>);
+    const date = getEntryDate(entry);
     if (!date) continue;
     const month = date.substring(0, 7);
     const existing = monthMap.get(month) || { hours: 0, invoiced: 0 };
-    existing.hours += num(entry.duration);
+    existing.hours += getEntryHours(entry);
     monthMap.set(month, existing);
   }
 
@@ -355,20 +373,20 @@ export function calculateMonthly(data: ProjectData): MonthlyBurnRate[] {
   let cumulativeInvoiced = 0;
 
   return sortedMonths.map((month) => {
-    const data = monthMap.get(month)!;
-    cumulativeHours += data.hours;
-    cumulativeInvoiced += data.invoiced;
+    const monthData = monthMap.get(month)!;
+    cumulativeHours += monthData.hours;
+    cumulativeInvoiced += monthData.invoiced;
 
     const monthlyBurnPercent =
       totalQuotedHours > 0 ? (cumulativeHours / totalQuotedHours) * 100 : 0;
 
     return {
       month,
-      monthlyHours: data.hours,
+      monthlyHours: monthData.hours,
       cumulativeHours,
       cumulativeQuoted: totalQuotedHours,
       monthlyBurnPercent,
-      monthlyInvoiced: data.invoiced,
+      monthlyInvoiced: monthData.invoiced,
       cumulativeInvoiced,
       rag: getRAGStatus(monthlyBurnPercent),
     };

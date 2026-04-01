@@ -26,69 +26,102 @@ async function scoroFetch<T = unknown>(
   return res.json();
 }
 
+/** Parse Scoro duration "HH:MM:SS" to decimal hours. Also handles plain numbers. */
+export function parseDuration(value: unknown): number {
+  if (value == null) return 0;
+  if (typeof value === "number") return value;
+  const str = String(value);
+  const match = str.match(/^(\d+):(\d+):(\d+)$/);
+  if (match) {
+    return parseInt(match[1], 10) + parseInt(match[2], 10) / 60 + parseInt(match[3], 10) / 3600;
+  }
+  const n = Number(str);
+  return isNaN(n) ? 0 : n;
+}
+
+// Scoro returns project_id for projects list, but "date" as start date and "deadline" as end
 export interface ScoroProject {
   project_id: number;
   project_name: string;
   company_name?: string;
-  start_date?: string;
-  end_date?: string;
+  date?: string;       // project start date
+  deadline?: string;   // project end date
+  start_date?: string; // alias used in demo data
+  end_date?: string;   // alias used in demo data
   status?: string;
   budget?: number;
   budget_type?: string;
   description?: string;
 }
 
+// Scoro time entry real fields
 export interface ScoroTimeEntry {
-  event_id: number;
+  time_entry_id?: number;
+  event_id?: number;
   activity_id: number;
-  activity_name?: string;
   user_id: number;
+  duration: string | number;           // "HH:MM:SS" or number
+  billable_duration?: string | number;
+  time_entry_date?: string;            // "YYYY-MM-DD"
+  date?: string;                       // fallback/demo
+  start_datetime?: string;
+  project_id?: number;
+  description?: string;
+  title?: string;
+  event_name?: string;                 // from task reference
+  // These may not exist in real Scoro data but are used in demo
+  activity_name?: string;
   user_name?: string;
-  duration: number;
-  date: string;
-  project_id: number;
   bill_rate?: number;
   cost_rate?: number;
-  description?: string;
 }
 
 export interface ScoroQuote {
-  quote_id: number;
+  id?: number;
+  quote_id?: number;  // demo data uses this
   no?: string;
-  lines?: ScoroQuoteLine[];
+  lines?: ScoroQuoteLine[] | null;
   sum?: number;
   vat_sum?: number;
   discount?: number;
   project_id?: number;
+  quote_name?: string;
 }
 
 export interface ScoroQuoteLine {
   product_id?: number;
   product_name?: string;
   comment?: string;
-  amount: number;
-  price: number;
-  sum: number;
+  comment2?: string;
+  amount: number | string;
+  price: number | string;
+  sum: number | string;
   activity_id?: number;
+  unit?: string;
 }
 
 export interface ScoroInvoice {
-  invoice_id: number;
+  id?: number;
+  invoice_id?: number;  // demo data uses this
   no?: string;
-  sum?: number;
-  vat_sum?: number;
+  sum?: number | string;
+  vat_sum?: number | string;
   date?: string;
   project_id?: number;
-  lines?: ScoroQuoteLine[];
+  lines?: ScoroQuoteLine[] | null;
 }
 
+// Scoro task real fields
 export interface ScoroTask {
-  task_id: number;
+  event_id?: number;
+  task_id?: number;    // demo data uses this
   activity_id?: number;
   event_name: string;
-  project_id: number;
+  project_id?: number;
   status?: string;
-  estimated_hours?: number;
+  duration_planned?: string | number;  // "HH:MM:SS"
+  duration_actual?: string | number;
+  estimated_hours?: number;            // demo data uses this
 }
 
 let projectsCache: ScoroProject[] | null = null;
