@@ -3,6 +3,10 @@ export interface ScoroResponse<T = unknown> {
   statusCode: number;
   data: T;
   messages?: { error?: string[] };
+  page?: number;
+  pages?: number;
+  per_page?: number;
+  total?: number;
 }
 
 async function scoroFetch<T = unknown>(
@@ -130,11 +134,48 @@ let projectsCache: ScoroProject[] | null = null;
 
 export async function loadAllProjects(): Promise<ScoroProject[]> {
   if (projectsCache) return projectsCache;
-  const response = await scoroFetch<ScoroProject[]>("/projects/list", {
-    per_page: 500,
+
+  const PER_PAGE = 100;
+  let page = 1;
+  let allProjects: ScoroProject[] = [];
+
+  // Fetch first page and log pagination info
+  const firstResponse = await scoroFetch<ScoroProject[]>("/projects/list", {
+    per_page: PER_PAGE,
     page: 1,
   });
-  projectsCache = response.data || [];
+
+  const firstPageData = firstResponse.data || [];
+  allProjects = [...firstPageData];
+
+  const totalPages = firstResponse.pages || 1;
+  console.log("[loadAllProjects] Pagination info:", {
+    page: firstResponse.page,
+    pages: firstResponse.pages,
+    per_page: firstResponse.per_page,
+    total: firstResponse.total,
+    firstPageCount: firstPageData.length,
+  });
+
+  // Fetch remaining pages
+  page = 2;
+  while (page <= totalPages) {
+    const response = await scoroFetch<ScoroProject[]>("/projects/list", {
+      per_page: PER_PAGE,
+      page,
+    });
+    const pageData = response.data || [];
+    if (pageData.length === 0) break;
+    allProjects = [...allProjects, ...pageData];
+    console.log(`[loadAllProjects] Page ${page}/${totalPages}: ${pageData.length} projects`);
+    page++;
+  }
+
+  // Sort alphabetically by name
+  allProjects.sort((a, b) => a.project_name.localeCompare(b.project_name));
+
+  console.log(`[loadAllProjects] Total loaded: ${allProjects.length} projects`);
+  projectsCache = allProjects;
   return projectsCache;
 }
 
