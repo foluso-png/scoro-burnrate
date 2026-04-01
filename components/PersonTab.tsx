@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, Fragment } from "react";
 import {
   PieChart,
   Pie,
@@ -56,9 +56,8 @@ export default function PersonTab({ people }: PersonTabProps) {
             </thead>
             <tbody>
               {people.map((person) => (
-                <>
+                <Fragment key={person.userId}>
                   <tr
-                    key={person.userId}
                     className="cursor-pointer border-b border-border/50 transition-colors hover:bg-border/20"
                     onClick={() =>
                       setExpandedId(
@@ -121,7 +120,7 @@ export default function PersonTab({ people }: PersonTabProps) {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               ))}
             </tbody>
           </table>

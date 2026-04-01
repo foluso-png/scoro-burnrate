@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, Fragment } from "react";
 import {
   BarChart,
   Bar,
@@ -123,9 +123,8 @@ export default function TaskTab({ tasks }: TaskTabProps) {
           </thead>
           <tbody>
             {sorted.map((task) => (
-              <>
+              <Fragment key={task.taskId}>
                 <tr
-                  key={task.taskId}
                   className="cursor-pointer border-b border-border/50 transition-colors hover:bg-border/20"
                   onClick={() =>
                     setExpandedId(
@@ -195,7 +194,7 @@ export default function TaskTab({ tasks }: TaskTabProps) {
                     </td>
                   </tr>
                 )}
-              </>
+              </Fragment>
             ))}
           </tbody>
         </table>
