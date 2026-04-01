@@ -208,6 +208,22 @@ export async function getTasks(projectId: number): Promise<ScoroTask[]> {
   return response.data || [];
 }
 
+export interface ScoroUser {
+  id: number;
+  username?: string;
+  firstname?: string;
+  lastname?: string;
+  full_name?: string;
+}
+
+export async function getUsers(): Promise<ScoroUser[]> {
+  const response = await scoroFetch<ScoroUser[]>("/users/list", {
+    per_page: 500,
+    page: 1,
+  });
+  return response.data || [];
+}
+
 export interface ProjectData {
   project: ScoroProject;
   timeEntries: ScoroTimeEntry[];
@@ -221,13 +237,51 @@ export async function fetchProjectData(
   dateFrom: string,
   dateTo: string
 ): Promise<ProjectData> {
-  const [project, timeEntries, quotes, invoices, tasks] = await Promise.all([
-    getProjectDetails(projectId),
-    getTimeEntries(projectId, dateFrom, dateTo),
-    getQuotes(projectId),
-    getInvoices(projectId),
-    getTasks(projectId),
-  ]);
+  const [project, timeEntries, quotes, invoices, tasks, users] =
+    await Promise.all([
+      getProjectDetails(projectId),
+      getTimeEntries(projectId, dateFrom, dateTo),
+      getQuotes(projectId),
+      getInvoices(projectId),
+      getTasks(projectId),
+      getUsers(),
+    ]);
 
-  return { project, timeEntries, quotes, invoices, tasks };
+  // Build lookup maps for user names and task names
+  const userMap = new Map<number, string>();
+  for (const u of users) {
+    const name =
+      u.full_name ||
+      [u.firstname, u.lastname].filter(Boolean).join(" ") ||
+      u.username ||
+      `User ${u.id}`;
+    userMap.set(u.id, name);
+  }
+
+  // Tasks: event_id is the task ID, time entries reference it via event_id
+  const taskNameMap = new Map<number, string>();
+  for (const t of tasks) {
+    if (t.event_id) taskNameMap.set(t.event_id, t.event_name);
+  }
+
+  // Enrich time entries with resolved names
+  const enrichedEntries = timeEntries.map((entry) => ({
+    ...entry,
+    user_name: userMap.get(entry.user_id) || `User ${entry.user_id}`,
+    activity_name:
+      (entry.event_id ? taskNameMap.get(entry.event_id) : undefined) ||
+      entry.title ||
+      `Task ${entry.event_id || entry.activity_id}`,
+  }));
+
+  console.log("[fetchProjectData] Enriched data:", {
+    timeEntries: enrichedEntries.length,
+    tasks: tasks.length,
+    quotes: quotes.length,
+    invoices: invoices.length,
+    users: users.length,
+    sampleEntry: enrichedEntries[0],
+  });
+
+  return { project, timeEntries: enrichedEntries, quotes, invoices, tasks };
 }

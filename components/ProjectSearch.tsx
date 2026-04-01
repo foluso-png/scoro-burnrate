@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { ScoroProject } from "@/lib/scoro";
-import { searchProjects } from "@/lib/scoro";
+import { loadAllProjects, clearProjectsCache } from "@/lib/scoro";
 import { demoProjects } from "@/lib/demoData";
 
 interface ProjectSearchProps {
@@ -15,56 +15,44 @@ export default function ProjectSearch({
   demoMode,
 }: ProjectSearchProps) {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<ScoroProject[]>([]);
+  const [allProjects, setAllProjects] = useState<ScoroProject[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const doSearch = useCallback(
-    async (term: string) => {
-      if (demoMode) {
-        const filtered = term.trim()
-          ? demoProjects.filter((p) =>
-              p.project_name.toLowerCase().includes(term.toLowerCase())
-            )
-          : demoProjects;
-        setResults(filtered);
-        return;
-      }
-
-      setLoading(true);
-      try {
-        const data = await searchProjects(term);
-        console.log("[ProjectSearch] query:", JSON.stringify(term), "results:", data.length, data.slice(0, 5));
-        setResults(data);
-      } catch (err) {
-        console.error("[ProjectSearch] error:", err);
-        setResults([]);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [demoMode]
-  );
-
-  // Load all projects on mount when not in demo mode
+  // Load projects when demo mode changes
   useEffect(() => {
-    if (!demoMode) {
-      doSearch("");
+    if (demoMode) {
+      setAllProjects(demoProjects);
+      return;
     }
-  }, [demoMode, doSearch]);
 
-  useEffect(() => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => {
-      doSearch(query);
-    }, 300);
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-  }, [query, doSearch]);
+    clearProjectsCache();
+    setLoading(true);
+    loadAllProjects()
+      .then((projects) => {
+        console.log("[ProjectSearch] Loaded", projects.length, "projects from Scoro");
+        setAllProjects(projects);
+      })
+      .catch((err) => {
+        console.error("[ProjectSearch] Failed to load projects:", err);
+        setAllProjects([]);
+      })
+      .finally(() => setLoading(false));
+  }, [demoMode]);
 
+  // Filter projects based on query
+  const filtered = query.trim()
+    ? allProjects.filter((p) => {
+        const term = query.toLowerCase();
+        return (
+          p.project_name.toLowerCase().includes(term) ||
+          (p.company_name && p.company_name.toLowerCase().includes(term))
+        );
+      })
+    : allProjects;
+
+  // Click outside to close
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (
@@ -87,11 +75,12 @@ export default function ProjectSearch({
           setQuery(e.target.value);
           setIsOpen(true);
         }}
-        onFocus={() => {
-          setIsOpen(true);
-          if (results.length === 0) doSearch(query);
-        }}
-        placeholder="Search projects..."
+        onFocus={() => setIsOpen(true)}
+        placeholder={
+          loading
+            ? "Loading projects..."
+            : `Search ${allProjects.length} projects...`
+        }
         className="w-full rounded-lg border border-border bg-card px-4 py-2 text-sm text-card-foreground placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
       {loading && (
@@ -99,9 +88,9 @@ export default function ProjectSearch({
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-blue-500" />
         </div>
       )}
-      {isOpen && results.length > 0 && (
+      {isOpen && filtered.length > 0 && (
         <ul className="absolute z-50 mt-1 max-h-72 w-full overflow-y-auto rounded-lg border border-border bg-card shadow-lg">
-          {results.map((project) => (
+          {filtered.slice(0, 50).map((project) => (
             <li key={project.project_id}>
               <button
                 type="button"
@@ -123,9 +112,14 @@ export default function ProjectSearch({
               </button>
             </li>
           ))}
+          {filtered.length > 50 && (
+            <li className="px-4 py-2 text-center text-xs text-muted">
+              {filtered.length - 50} more — type to narrow results
+            </li>
+          )}
         </ul>
       )}
-      {isOpen && query.trim() && results.length === 0 && !loading && (
+      {isOpen && query.trim() && filtered.length === 0 && !loading && (
         <div className="absolute z-50 mt-1 w-full rounded-lg border border-border bg-card p-4 text-center text-sm text-muted shadow-lg">
           No projects found
         </div>

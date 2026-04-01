@@ -108,6 +108,13 @@ export function calculateOverview(data: ProjectData): OverviewSummary {
     }
   }
 
+  // Fallback: if no quoted hours from quote lines, sum task duration_planned
+  if (totalQuotedHours === 0) {
+    for (const task of data.tasks) {
+      totalQuotedHours += parseDuration(task.duration_planned || task.estimated_hours);
+    }
+  }
+
   const totalActualCost = timeEntries.reduce(
     (sum, e) => sum + getEntryHours(e) * num(e.cost_rate),
     0
@@ -140,6 +147,7 @@ export function calculateOverview(data: ProjectData): OverviewSummary {
 export function calculateByTask(data: ProjectData): TaskBurnRate[] {
   const { timeEntries, quotes, tasks } = data;
 
+  // Build quote line lookup by name
   const quoteLookup = new Map<
     string,
     { hours: number; value: number }
@@ -153,6 +161,13 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
       existing.value += num(line.sum);
       quoteLookup.set(key, existing);
     }
+  }
+
+  // Build task planned hours lookup (from duration_planned HH:MM:SS)
+  const taskPlannedHours = new Map<number, number>();
+  for (const task of tasks) {
+    const taskId = task.event_id || task.task_id || task.activity_id || 0;
+    taskPlannedHours.set(taskId, parseDuration(task.duration_planned || task.estimated_hours));
   }
 
   const taskMap = new Map<
@@ -213,9 +228,12 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
       value: 0,
     };
 
+    // Fallback to task's duration_planned if no quote line hours
+    const quotedHours = quoteData.hours > 0 ? quoteData.hours : (taskPlannedHours.get(taskId) || 0);
+
     const hoursBurnPercent =
-      quoteData.hours > 0
-        ? (taskData.loggedHours / quoteData.hours) * 100
+      quotedHours > 0
+        ? (taskData.loggedHours / quotedHours) * 100
         : taskData.loggedHours > 0
         ? 100
         : 0;
@@ -232,7 +250,7 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
       taskId,
       taskName: taskData.taskName,
       activityId: taskData.activityId,
-      quotedHours: quoteData.hours,
+      quotedHours: quotedHours,
       loggedHours: taskData.loggedHours,
       hoursBurnPercent,
       quotedValue: quoteData.value,
@@ -341,6 +359,12 @@ export function calculateMonthly(data: ProjectData): MonthlyBurnRate[] {
     const lines = quote.lines || [];
     for (const line of lines) {
       totalQuotedHours += num(line.amount);
+    }
+  }
+  // Fallback: if no quoted hours from quote lines, sum task duration_planned
+  if (totalQuotedHours === 0) {
+    for (const task of data.tasks) {
+      totalQuotedHours += parseDuration(task.duration_planned || task.estimated_hours);
     }
   }
 
