@@ -38,7 +38,7 @@ export default function PersonTab({ people }: PersonTabProps) {
                   Person
                 </th>
                 <th className="px-4 py-3 text-right font-semibold text-card-foreground">
-                  Total Hours
+                  Billable Hours
                 </th>
                 <th className="px-4 py-3 text-right font-semibold text-card-foreground">
                   Total Cost
@@ -72,7 +72,12 @@ export default function PersonTab({ people }: PersonTabProps) {
                       {person.personName}
                     </td>
                     <td className="px-4 py-3 text-right text-card-foreground">
-                      {formatHours(person.totalHours)}
+                      {formatHours(person.billableHours)}
+                      {person.totalHours !== person.billableHours && (
+                        <span className="ml-1 text-xs text-muted">
+                          ({formatHours(person.totalHours)} total)
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right text-card-foreground">
                       {formatCurrency(person.totalCost)}

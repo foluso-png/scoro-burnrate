@@ -41,7 +41,7 @@ export default function MonthlyTab({ months }: MonthlyTabProps) {
                 Month
               </th>
               <th className="px-4 py-3 text-right font-semibold text-card-foreground">
-                Monthly Hrs
+                Billable Hrs
               </th>
               <th className="px-4 py-3 text-right font-semibold text-card-foreground">
                 Cumul. Hrs
@@ -73,7 +73,12 @@ export default function MonthlyTab({ months }: MonthlyTabProps) {
                   {m.month}
                 </td>
                 <td className="px-4 py-3 text-right text-card-foreground">
-                  {formatHours(m.monthlyHours)}
+                  {formatHours(m.monthlyBillableHours)}
+                  {m.monthlyHours !== m.monthlyBillableHours && (
+                    <span className="ml-1 text-xs text-muted">
+                      ({formatHours(m.monthlyHours)} total)
+                    </span>
+                  )}
                 </td>
                 <td className="px-4 py-3 text-right text-card-foreground">
                   {formatHours(m.cumulativeHours)}

@@ -69,6 +69,8 @@ export interface ScoroTimeEntry {
   description?: string;
   title?: string;
   event_name?: string;                 // from task reference
+  is_billable?: number | boolean;      // 0/1 from Scoro
+  is_billed?: number | boolean;
   // These may not exist in real Scoro data but are used in demo
   activity_name?: string;
   user_name?: string;

@@ -175,7 +175,7 @@ export default function Home() {
           <DashboardTabs>
             {{
               overview: (
-                <OverviewTab summary={summary} taskData={taskData} />
+                <OverviewTab summary={summary} />
               ),
               task: <TaskTab tasks={taskData} />,
               person: <PersonTab people={personData} />,

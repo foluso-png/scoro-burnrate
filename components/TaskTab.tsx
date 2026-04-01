@@ -93,7 +93,7 @@ export default function TaskTab({ tasks }: TaskTabProps) {
                 className="cursor-pointer px-4 py-3 text-right font-semibold text-card-foreground"
                 onClick={() => handleSort("loggedHours")}
               >
-                Logged Hrs
+                Billable Hrs
                 <SortIcon field="loggedHours" />
               </th>
               <th
@@ -142,7 +142,12 @@ export default function TaskTab({ tasks }: TaskTabProps) {
                     {formatHours(task.quotedHours)}
                   </td>
                   <td className="px-4 py-3 text-right text-card-foreground">
-                    {formatHours(task.loggedHours)}
+                    {formatHours(task.billableHours)}
+                    {task.loggedHours !== task.billableHours && (
+                      <span className="ml-1 text-xs text-muted">
+                        ({formatHours(task.loggedHours)} total)
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right text-card-foreground">
                     {formatPercent(task.hoursBurnPercent)}

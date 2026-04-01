@@ -10,46 +10,57 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
-import type { OverviewSummary, TaskBurnRate } from "@/lib/burnRate";
+import type { OverviewSummary } from "@/lib/burnRate";
 import { formatCurrency, formatHours, formatPercent } from "@/lib/formatters";
 import SummaryCard from "./SummaryCard";
 
 interface OverviewTabProps {
   summary: OverviewSummary;
-  taskData: TaskBurnRate[];
 }
 
-export default function OverviewTab({ summary, taskData }: OverviewTabProps) {
-  const chartData = taskData.slice(0, 10).map((t) => ({
-    name: t.taskName.length > 20 ? t.taskName.slice(0, 18) + "..." : t.taskName,
-    "Quoted Hours": t.quotedHours,
-    "Actual Hours": t.loggedHours,
-  }));
+export default function OverviewTab({ summary }: OverviewTabProps) {
+  const hoursChartData = [
+    {
+      name: "Hours",
+      Quoted: summary.totalQuotedHours,
+      Billable: summary.billableHours,
+      "Non-Billable": summary.nonBillableHours,
+    },
+  ];
 
-  const costChartData = taskData.slice(0, 10).map((t) => ({
-    name: t.taskName.length > 20 ? t.taskName.slice(0, 18) + "..." : t.taskName,
-    "Quoted Value": t.quotedValue,
-    "Actual Cost": t.actualCost,
-  }));
+  const costChartData = [
+    {
+      name: "Cost / Value",
+      "Quoted Value": summary.totalQuotedValue,
+      Invoiced: summary.totalInvoiced,
+    },
+  ];
 
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <SummaryCard
-          title="Total Quoted Hours"
+          title="Quoted Hours"
           value={formatHours(summary.totalQuotedHours)}
+          subtitle="From quotes / task plans"
         />
         <SummaryCard
-          title="Total Logged Hours"
-          value={formatHours(summary.totalLoggedHours)}
+          title="Billable Hours"
+          value={formatHours(summary.billableHours)}
+          subtitle={`of ${formatHours(summary.totalLoggedHours)} total logged`}
         />
         <SummaryCard
-          title="Hours Burn %"
+          title="Non-Billable Hours"
+          value={formatHours(summary.nonBillableHours)}
+        />
+        <SummaryCard
+          title="Hours Burn Rate"
           value={formatPercent(summary.hoursBurnPercent)}
+          subtitle={`${formatHours(summary.billableHours)} of ${formatHours(summary.totalQuotedHours)} quoted`}
           rag={summary.hoursBurnRAG}
         />
         <SummaryCard
-          title="Total Quoted Value"
+          title="Quoted Value"
           value={formatCurrency(summary.totalQuotedValue)}
         />
         <SummaryCard
@@ -57,17 +68,14 @@ export default function OverviewTab({ summary, taskData }: OverviewTabProps) {
           value={formatCurrency(summary.totalInvoiced)}
         />
         <SummaryCard
-          title="Cost Burn %"
+          title="Cost Burn Rate"
           value={formatPercent(summary.costBurnPercent)}
           rag={summary.costBurnRAG}
         />
         <SummaryCard
-          title="Budget"
-          value={formatCurrency(summary.budget)}
-        />
-        <SummaryCard
           title="Budget Remaining"
           value={formatCurrency(summary.budgetRemaining)}
+          subtitle={`of ${formatCurrency(summary.budget)} budget`}
           rag={summary.budgetRemaining < 0 ? "red" : summary.budgetRemaining < summary.budget * 0.25 ? "amber" : "green"}
         />
       </div>
@@ -77,15 +85,12 @@ export default function OverviewTab({ summary, taskData }: OverviewTabProps) {
           <h3 className="mb-4 text-sm font-semibold text-card-foreground">
             Hours: Quoted vs Actual
           </h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={chartData}>
+          <ResponsiveContainer width="100%" height={250}>
+            <BarChart data={hoursChartData} barSize={60}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
               <XAxis
                 dataKey="name"
-                tick={{ fontSize: 11, fill: "var(--color-muted)" }}
-                angle={-30}
-                textAnchor="end"
-                height={80}
+                tick={{ fontSize: 12, fill: "var(--color-muted)" }}
               />
               <YAxis tick={{ fontSize: 12, fill: "var(--color-muted)" }} />
               <Tooltip
@@ -95,27 +100,26 @@ export default function OverviewTab({ summary, taskData }: OverviewTabProps) {
                   borderRadius: "8px",
                   color: "var(--color-card-foreground)",
                 }}
+                formatter={(value) => `${Number(value).toFixed(1)} hrs`}
               />
               <Legend />
-              <Bar dataKey="Quoted Hours" fill="#94a3b8" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="Actual Hours" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Quoted" fill="#94a3b8" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Billable" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Non-Billable" fill="#e2e8f0" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
 
         <div className="rounded-lg border border-border bg-card p-6">
           <h3 className="mb-4 text-sm font-semibold text-card-foreground">
-            Cost: Quoted vs Actual
+            Value: Quoted vs Invoiced
           </h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={costChartData}>
+          <ResponsiveContainer width="100%" height={250}>
+            <BarChart data={costChartData} barSize={60}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
               <XAxis
                 dataKey="name"
-                tick={{ fontSize: 11, fill: "var(--color-muted)" }}
-                angle={-30}
-                textAnchor="end"
-                height={80}
+                tick={{ fontSize: 12, fill: "var(--color-muted)" }}
               />
               <YAxis tick={{ fontSize: 12, fill: "var(--color-muted)" }} />
               <Tooltip
@@ -129,7 +133,7 @@ export default function OverviewTab({ summary, taskData }: OverviewTabProps) {
               />
               <Legend />
               <Bar dataKey="Quoted Value" fill="#94a3b8" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="Actual Cost" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Invoiced" fill="#f59e0b" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
