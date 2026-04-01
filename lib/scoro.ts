@@ -232,12 +232,22 @@ export interface ProjectData {
   tasks: ScoroTask[];
 }
 
+async function getTasksByEventIds(eventIds: number[]): Promise<ScoroTask[]> {
+  if (eventIds.length === 0) return [];
+  const response = await scoroFetch<ScoroTask[]>("/tasks/list", {
+    filter: { event_id: eventIds },
+    per_page: 500,
+    page: 1,
+  });
+  return response.data || [];
+}
+
 export async function fetchProjectData(
   projectId: number,
   dateFrom: string,
   dateTo: string
 ): Promise<ProjectData> {
-  const [project, timeEntries, quotes, invoices, tasks, users] =
+  const [project, timeEntries, quotes, invoices, projectTasks, users] =
     await Promise.all([
       getProjectDetails(projectId),
       getTimeEntries(projectId, dateFrom, dateTo),
@@ -247,7 +257,32 @@ export async function fetchProjectData(
       getUsers(),
     ]);
 
-  // Build lookup maps for user names and task names
+  // Build task name map from project tasks
+  const taskNameMap = new Map<number, string>();
+  for (const t of projectTasks) {
+    if (t.event_id) taskNameMap.set(t.event_id, t.event_name);
+  }
+
+  // Find time entry event_ids not in the project task list
+  const missingEventIds = new Set<number>();
+  for (const entry of timeEntries) {
+    if (entry.event_id && !taskNameMap.has(entry.event_id)) {
+      missingEventIds.add(entry.event_id);
+    }
+  }
+
+  // Fetch missing tasks by event_id and merge into lookup
+  let allTasks = projectTasks;
+  if (missingEventIds.size > 0) {
+    console.log(`[fetchProjectData] Fetching ${missingEventIds.size} missing task names...`);
+    const missingTasks = await getTasksByEventIds(Array.from(missingEventIds));
+    for (const t of missingTasks) {
+      if (t.event_id) taskNameMap.set(t.event_id, t.event_name);
+    }
+    allTasks = [...projectTasks, ...missingTasks];
+  }
+
+  // Build user name lookup
   const userMap = new Map<number, string>();
   for (const u of users) {
     const name =
@@ -258,10 +293,21 @@ export async function fetchProjectData(
     userMap.set(u.id, name);
   }
 
-  // Tasks: event_id is the task ID, time entries reference it via event_id
-  const taskNameMap = new Map<number, string>();
-  for (const t of tasks) {
-    if (t.event_id) taskNameMap.set(t.event_id, t.event_name);
+  // Log raw responses for debugging
+  console.log("[fetchProjectData] Raw data:", {
+    timeEntries: timeEntries.length,
+    projectTasks: projectTasks.length,
+    resolvedTaskNames: taskNameMap.size,
+    quotes: quotes.length,
+    quotesWithLines: quotes.filter((q) => (q.lines || []).length > 0).length,
+    invoices: invoices.length,
+    users: users.length,
+  });
+  if (timeEntries.length > 0) {
+    console.log("[fetchProjectData] Sample time entry:", JSON.stringify(timeEntries[0], null, 2));
+  }
+  if (quotes.length > 0) {
+    console.log("[fetchProjectData] Sample quote:", JSON.stringify(quotes[0], null, 2));
   }
 
   // Enrich time entries with resolved names
@@ -274,14 +320,5 @@ export async function fetchProjectData(
       `Task ${entry.event_id || entry.activity_id}`,
   }));
 
-  console.log("[fetchProjectData] Enriched data:", {
-    timeEntries: enrichedEntries.length,
-    tasks: tasks.length,
-    quotes: quotes.length,
-    invoices: invoices.length,
-    users: users.length,
-    sampleEntry: enrichedEntries[0],
-  });
-
-  return { project, timeEntries: enrichedEntries, quotes, invoices, tasks };
+  return { project, timeEntries: enrichedEntries, quotes, invoices, tasks: allTasks };
 }
