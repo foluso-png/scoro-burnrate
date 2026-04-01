@@ -25,6 +25,19 @@ const ragCellClass = {
 };
 
 export default function MonthlyTab({ months }: MonthlyTabProps) {
+  if (months.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center rounded-lg border border-border bg-card py-16 text-center">
+        <h3 className="text-lg font-semibold text-card-foreground">
+          No monthly data available
+        </h3>
+        <p className="mt-2 max-w-md text-sm text-muted">
+          No time entries or invoices found in the selected date range.
+        </p>
+      </div>
+    );
+  }
+
   const chartData = months.map((m) => ({
     month: m.month,
     "Cumulative Logged": m.cumulativeHours,

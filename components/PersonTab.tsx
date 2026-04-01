@@ -22,6 +22,19 @@ interface PersonTabProps {
 export default function PersonTab({ people }: PersonTabProps) {
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
+  if (people.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center rounded-lg border border-border bg-card py-16 text-center">
+        <h3 className="text-lg font-semibold text-card-foreground">
+          No time entries found
+        </h3>
+        <p className="mt-2 max-w-md text-sm text-muted">
+          No one has logged time on this project in the selected date range.
+        </p>
+      </div>
+    );
+  }
+
   const pieData = people.map((p) => ({
     name: p.personName,
     value: p.totalHours,

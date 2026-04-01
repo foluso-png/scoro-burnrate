@@ -44,6 +44,10 @@ export interface OverviewSummary {
   budgetRemaining: number;
   hoursBurnRAG: RAGStatus;
   costBurnRAG: RAGStatus;
+  hasQuotes: boolean;
+  hasInvoices: boolean;
+  hasTasks: boolean;
+  hasTimeEntries: boolean;
 }
 
 export interface TaskBurnRate {
@@ -161,11 +165,18 @@ export function calculateOverview(data: ProjectData): OverviewSummary {
     budgetRemaining,
     hoursBurnRAG: getRAGStatus(hoursBurnPercent),
     costBurnRAG: getRAGStatus(costBurnPercent),
+    hasQuotes: quotes.length > 0,
+    hasInvoices: invoices.length > 0,
+    hasTasks: data.tasks.length > 0,
+    hasTimeEntries: timeEntries.length > 0,
   };
 }
 
 export function calculateByTask(data: ProjectData): TaskBurnRate[] {
   const { timeEntries, quotes, tasks } = data;
+
+  // If no tasks exist in the project, return empty — UI will show empty state
+  // (Don't fabricate tasks from time entries)
 
   // Build quote line lookup by name
   const quoteLookup = new Map<
@@ -183,18 +194,13 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
     }
   }
 
-  // Build task planned hours lookup (from duration_planned HH:MM:SS)
-  const taskPlannedHours = new Map<number, number>();
-  for (const task of tasks) {
-    const taskId = task.event_id || task.task_id || task.activity_id || 0;
-    taskPlannedHours.set(taskId, parseDuration(task.duration_planned || task.estimated_hours));
-  }
-
+  // Build task map ONLY from actual project tasks
   const taskMap = new Map<
     number,
     {
       taskName: string;
       activityId?: number;
+      plannedHours: number;
       loggedHours: number;
       billableHours: number;
       actualCost: number;
@@ -207,6 +213,7 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
     taskMap.set(taskId, {
       taskName: task.event_name,
       activityId: task.activity_id,
+      plannedHours: parseDuration(task.duration_planned || task.estimated_hours),
       loggedHours: 0,
       billableHours: 0,
       actualCost: 0,
@@ -214,39 +221,48 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
     });
   }
 
+  // Track unassigned time entries (can't match to any project task)
+  const unassigned = {
+    loggedHours: 0,
+    billableHours: 0,
+    actualCost: 0,
+    entries: [] as TaskBurnRate["timeEntries"],
+  };
+
   for (const entry of timeEntries) {
-    // Try to match by event_id first (task reference), then activity_id
     const matchKey = entry.event_id || entry.activity_id;
-    let taskEntry = taskMap.get(matchKey);
-    if (!taskEntry && entry.activity_id !== matchKey) {
+    let taskEntry = matchKey ? taskMap.get(matchKey) : undefined;
+    // Also try activity_id if event_id didn't match
+    if (!taskEntry && entry.activity_id && entry.activity_id !== matchKey) {
       taskEntry = taskMap.get(entry.activity_id);
     }
-    if (!taskEntry) {
-      const name = entry.activity_name || entry.event_name || `Task ${matchKey}`;
-      taskEntry = {
-        taskName: name,
-        activityId: entry.activity_id,
-        loggedHours: 0,
-        billableHours: 0,
-        actualCost: 0,
-        entries: [],
-      };
-      taskMap.set(matchKey, taskEntry);
-    }
+
     const hours = getEntryHours(entry);
     const billable = isBillable(entry);
-    taskEntry.loggedHours += hours;
-    if (billable) {
-      taskEntry.billableHours += hours;
-      taskEntry.actualCost += hours * num(entry.cost_rate);
-    }
-    taskEntry.entries.push({
+    const entryRow = {
       userName: entry.user_name || `User ${entry.user_id}`,
       date: getEntryDate(entry) || "unknown",
       duration: hours,
       billable,
       description: entry.description || entry.title || undefined,
-    });
+    };
+
+    if (taskEntry) {
+      taskEntry.loggedHours += hours;
+      if (billable) {
+        taskEntry.billableHours += hours;
+        taskEntry.actualCost += hours * num(entry.cost_rate);
+      }
+      taskEntry.entries.push(entryRow);
+    } else {
+      // No matching project task — goes to "Unassigned"
+      unassigned.loggedHours += hours;
+      if (billable) {
+        unassigned.billableHours += hours;
+        unassigned.actualCost += hours * num(entry.cost_rate);
+      }
+      unassigned.entries.push(entryRow);
+    }
   }
 
   const results: TaskBurnRate[] = [];
@@ -256,8 +272,8 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
       value: 0,
     };
 
-    // Fallback to task's duration_planned if no quote line hours
-    const quotedHours = quoteData.hours > 0 ? quoteData.hours : (taskPlannedHours.get(taskId) || 0);
+    // Use quote line hours, fall back to task's duration_planned
+    const quotedHours = quoteData.hours > 0 ? quoteData.hours : taskData.plannedHours;
 
     // Burn rate uses billable hours only
     const hoursBurnPercent =
@@ -279,7 +295,7 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
       taskId,
       taskName: taskData.taskName,
       activityId: taskData.activityId,
-      quotedHours: quotedHours,
+      quotedHours,
       loggedHours: taskData.loggedHours,
       billableHours: taskData.billableHours,
       hoursBurnPercent,
@@ -296,6 +312,23 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
     const bMax = Math.max(b.hoursBurnPercent, b.costBurnPercent);
     return bMax - aMax;
   });
+
+  // Add "Unassigned" row at the bottom if there are unmatched time entries
+  if (unassigned.entries.length > 0) {
+    results.push({
+      taskId: -1,
+      taskName: "Unassigned",
+      quotedHours: 0,
+      loggedHours: unassigned.loggedHours,
+      billableHours: unassigned.billableHours,
+      hoursBurnPercent: unassigned.billableHours > 0 ? 100 : 0,
+      quotedValue: 0,
+      actualCost: unassigned.actualCost,
+      costBurnPercent: unassigned.actualCost > 0 ? 100 : 0,
+      rag: unassigned.billableHours > 0 ? "amber" as RAGStatus : "green" as RAGStatus,
+      timeEntries: unassigned.entries,
+    });
+  }
 
   return results;
 }

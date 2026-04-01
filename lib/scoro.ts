@@ -234,16 +234,6 @@ export interface ProjectData {
   tasks: ScoroTask[];
 }
 
-async function getTasksByEventIds(eventIds: number[]): Promise<ScoroTask[]> {
-  if (eventIds.length === 0) return [];
-  const response = await scoroFetch<ScoroTask[]>("/tasks/list", {
-    filter: { event_id: eventIds },
-    per_page: 500,
-    page: 1,
-  });
-  return response.data || [];
-}
-
 export async function fetchProjectData(
   projectId: number,
   dateFrom: string,
@@ -259,29 +249,23 @@ export async function fetchProjectData(
       getUsers(),
     ]);
 
-  // Build task name map from project tasks
+  // Log raw task list to see actual Scoro field names
+  console.log("[fetchProjectData] Raw project tasks response:", {
+    count: projectTasks.length,
+    sample: projectTasks.length > 0 ? JSON.stringify(projectTasks[0], null, 2) : "none",
+    allTaskIds: projectTasks.map((t) => ({
+      event_id: t.event_id,
+      task_id: t.task_id,
+      activity_id: t.activity_id,
+      event_name: t.event_name,
+    })),
+  });
+
+  // Build task name map ONLY from project tasks — never fetch external tasks
   const taskNameMap = new Map<number, string>();
   for (const t of projectTasks) {
-    if (t.event_id) taskNameMap.set(t.event_id, t.event_name);
-  }
-
-  // Find time entry event_ids not in the project task list
-  const missingEventIds = new Set<number>();
-  for (const entry of timeEntries) {
-    if (entry.event_id && !taskNameMap.has(entry.event_id)) {
-      missingEventIds.add(entry.event_id);
-    }
-  }
-
-  // Fetch missing tasks by event_id and merge into lookup
-  let allTasks = projectTasks;
-  if (missingEventIds.size > 0) {
-    console.log(`[fetchProjectData] Fetching ${missingEventIds.size} missing task names...`);
-    const missingTasks = await getTasksByEventIds(Array.from(missingEventIds));
-    for (const t of missingTasks) {
-      if (t.event_id) taskNameMap.set(t.event_id, t.event_name);
-    }
-    allTasks = [...projectTasks, ...missingTasks];
+    const id = t.event_id || t.task_id || t.activity_id;
+    if (id) taskNameMap.set(id, t.event_name);
   }
 
   // Build user name lookup
@@ -295,11 +279,10 @@ export async function fetchProjectData(
     userMap.set(u.id, name);
   }
 
-  // Log raw responses for debugging
-  console.log("[fetchProjectData] Raw data:", {
+  // Log summary
+  console.log("[fetchProjectData] Data summary:", {
     timeEntries: timeEntries.length,
     projectTasks: projectTasks.length,
-    resolvedTaskNames: taskNameMap.size,
     quotes: quotes.length,
     quotesWithLines: quotes.filter((q) => (q.lines || []).length > 0).length,
     invoices: invoices.length,
@@ -312,15 +295,28 @@ export async function fetchProjectData(
     console.log("[fetchProjectData] Sample quote:", JSON.stringify(quotes[0], null, 2));
   }
 
-  // Enrich time entries with resolved names
-  const enrichedEntries = timeEntries.map((entry) => ({
-    ...entry,
-    user_name: userMap.get(entry.user_id) || `User ${entry.user_id}`,
-    activity_name:
-      (entry.event_id ? taskNameMap.get(entry.event_id) : undefined) ||
-      entry.title ||
-      `Task ${entry.event_id || entry.activity_id}`,
-  }));
+  // Log unmatched time entries for debugging
+  const unmatchedEventIds = new Set<number>();
+  for (const entry of timeEntries) {
+    const matchId = entry.event_id || entry.activity_id;
+    if (matchId && !taskNameMap.has(matchId)) {
+      unmatchedEventIds.add(matchId);
+    }
+  }
+  if (unmatchedEventIds.size > 0) {
+    console.log(`[fetchProjectData] ${unmatchedEventIds.size} time entry event_ids have no matching project task:`, Array.from(unmatchedEventIds));
+  }
 
-  return { project, timeEntries: enrichedEntries, quotes, invoices, tasks: allTasks };
+  // Enrich time entries with resolved names (only from project tasks)
+  const enrichedEntries = timeEntries.map((entry) => {
+    const matchId = entry.event_id || entry.activity_id;
+    const taskName = matchId ? taskNameMap.get(matchId) : undefined;
+    return {
+      ...entry,
+      user_name: userMap.get(entry.user_id) || `User ${entry.user_id}`,
+      activity_name: taskName || undefined, // Don't fabricate names
+    };
+  });
+
+  return { project, timeEntries: enrichedEntries, quotes, invoices, tasks: projectTasks };
 }

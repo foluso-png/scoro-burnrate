@@ -73,6 +73,20 @@ export default function TaskTab({ tasks }: TaskTabProps) {
     </span>
   );
 
+  if (tasks.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center rounded-lg border border-border bg-card py-16 text-center">
+        <h3 className="text-lg font-semibold text-card-foreground">
+          No tasks found for this project
+        </h3>
+        <p className="mt-2 max-w-md text-sm text-muted">
+          This project has no tasks in Scoro. Tasks need to be created in Scoro
+          before they appear here.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="overflow-x-auto rounded-lg border border-border">

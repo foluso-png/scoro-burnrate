@@ -42,12 +42,12 @@ export default function OverviewTab({ summary }: OverviewTabProps) {
         <SummaryCard
           title="Quoted Hours"
           value={formatHours(summary.totalQuotedHours)}
-          subtitle="From quotes / task plans"
+          subtitle={!summary.hasQuotes && !summary.hasTasks ? "No quotes or tasks found" : "From quotes / task plans"}
         />
         <SummaryCard
           title="Billable Hours"
           value={formatHours(summary.billableHours)}
-          subtitle={`of ${formatHours(summary.totalLoggedHours)} total logged`}
+          subtitle={summary.hasTimeEntries ? `of ${formatHours(summary.totalLoggedHours)} total logged` : "No time entries found"}
         />
         <SummaryCard
           title="Non-Billable Hours"
@@ -55,22 +55,27 @@ export default function OverviewTab({ summary }: OverviewTabProps) {
         />
         <SummaryCard
           title="Hours Burn Rate"
-          value={formatPercent(summary.hoursBurnPercent)}
-          subtitle={`${formatHours(summary.billableHours)} of ${formatHours(summary.totalQuotedHours)} quoted`}
-          rag={summary.hoursBurnRAG}
+          value={summary.totalQuotedHours > 0 ? formatPercent(summary.hoursBurnPercent) : "N/A"}
+          subtitle={summary.totalQuotedHours > 0
+            ? `${formatHours(summary.billableHours)} of ${formatHours(summary.totalQuotedHours)} quoted`
+            : "No quoted hours to compare"}
+          rag={summary.totalQuotedHours > 0 ? summary.hoursBurnRAG : undefined}
         />
         <SummaryCard
           title="Quoted Value"
           value={formatCurrency(summary.totalQuotedValue)}
+          subtitle={!summary.hasQuotes ? "No quotes found" : undefined}
         />
         <SummaryCard
           title="Total Invoiced"
           value={formatCurrency(summary.totalInvoiced)}
+          subtitle={!summary.hasInvoices ? "No invoices found" : undefined}
         />
         <SummaryCard
           title="Cost Burn Rate"
-          value={formatPercent(summary.costBurnPercent)}
-          rag={summary.costBurnRAG}
+          value={summary.totalQuotedValue > 0 ? formatPercent(summary.costBurnPercent) : "N/A"}
+          subtitle={summary.totalQuotedValue > 0 ? undefined : "No quoted value to compare"}
+          rag={summary.totalQuotedValue > 0 ? summary.costBurnRAG : undefined}
         />
         <SummaryCard
           title="Budget Remaining"
