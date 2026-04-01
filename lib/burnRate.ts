@@ -60,8 +60,16 @@ export interface MonthlyBurnRate {
   rag: RAGStatus;
 }
 
+function getEntryDate(entry: { date?: string; start_date?: string; datetime?: string }): string | null {
+  return entry.date || entry.start_date || (entry.datetime ? entry.datetime.substring(0, 10) : null);
+}
+
 export function calculateOverview(data: ProjectData): OverviewSummary {
   const { timeEntries, quotes, invoices, project } = data;
+
+  if (timeEntries.length > 0) {
+    console.log("[burnRate] First time entry from Scoro:", JSON.stringify(timeEntries[0], null, 2));
+  }
 
   const totalLoggedHours = timeEntries.reduce(
     (sum, e) => sum + (e.duration || 0),
@@ -167,7 +175,7 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
     taskEntry.actualCost += (entry.duration || 0) * (entry.cost_rate || 0);
     taskEntry.entries.push({
       userName: entry.user_name || `User ${entry.user_id}`,
-      date: entry.date,
+      date: getEntryDate(entry as unknown as Record<string, string>) || "unknown",
       duration: entry.duration,
       description: entry.description,
     });
@@ -317,7 +325,9 @@ export function calculateMonthly(data: ProjectData): MonthlyBurnRate[] {
   >();
 
   for (const entry of timeEntries) {
-    const month = entry.date.substring(0, 7);
+    const date = getEntryDate(entry as unknown as Record<string, string>);
+    if (!date) continue;
+    const month = date.substring(0, 7);
     const existing = monthMap.get(month) || { hours: 0, invoiced: 0 };
     existing.hours += entry.duration || 0;
     monthMap.set(month, existing);
