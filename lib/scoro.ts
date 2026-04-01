@@ -91,15 +91,33 @@ export interface ScoroTask {
   estimated_hours?: number;
 }
 
+let projectsCache: ScoroProject[] | null = null;
+
+export async function loadAllProjects(): Promise<ScoroProject[]> {
+  if (projectsCache) return projectsCache;
+  const response = await scoroFetch<ScoroProject[]>("/projects/list", {
+    per_page: 500,
+    page: 1,
+  });
+  projectsCache = response.data || [];
+  return projectsCache;
+}
+
+export function clearProjectsCache() {
+  projectsCache = null;
+}
+
 export async function searchProjects(
   searchTerm: string
 ): Promise<ScoroProject[]> {
-  const response = await scoroFetch<ScoroProject[]>("/projects/list", {
-    filter: { project_name: searchTerm },
-    per_page: 20,
-    page: 1,
-  });
-  return response.data || [];
+  const allProjects = await loadAllProjects();
+  if (!searchTerm.trim()) return allProjects;
+  const term = searchTerm.toLowerCase();
+  return allProjects.filter(
+    (p) =>
+      p.project_name.toLowerCase().includes(term) ||
+      (p.company_name && p.company_name.toLowerCase().includes(term))
+  );
 }
 
 export async function getTimeEntries(

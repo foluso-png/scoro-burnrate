@@ -23,25 +23,23 @@ export default function ProjectSearch({
 
   const doSearch = useCallback(
     async (term: string) => {
-      if (!term.trim()) {
-        setResults([]);
-        return;
-      }
-
       if (demoMode) {
-        setResults(
-          demoProjects.filter((p) =>
-            p.project_name.toLowerCase().includes(term.toLowerCase())
-          )
-        );
+        const filtered = term.trim()
+          ? demoProjects.filter((p) =>
+              p.project_name.toLowerCase().includes(term.toLowerCase())
+            )
+          : demoProjects;
+        setResults(filtered);
         return;
       }
 
       setLoading(true);
       try {
         const data = await searchProjects(term);
+        console.log("[ProjectSearch] query:", JSON.stringify(term), "results:", data.length, data.slice(0, 5));
         setResults(data);
-      } catch {
+      } catch (err) {
+        console.error("[ProjectSearch] error:", err);
         setResults([]);
       } finally {
         setLoading(false);
@@ -49,6 +47,13 @@ export default function ProjectSearch({
     },
     [demoMode]
   );
+
+  // Load all projects on mount when not in demo mode
+  useEffect(() => {
+    if (!demoMode) {
+      doSearch("");
+    }
+  }, [demoMode, doSearch]);
 
   useEffect(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -82,7 +87,10 @@ export default function ProjectSearch({
           setQuery(e.target.value);
           setIsOpen(true);
         }}
-        onFocus={() => setIsOpen(true)}
+        onFocus={() => {
+          setIsOpen(true);
+          if (results.length === 0) doSearch(query);
+        }}
         placeholder="Search projects..."
         className="w-full rounded-lg border border-border bg-card px-4 py-2 text-sm text-card-foreground placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
@@ -92,7 +100,7 @@ export default function ProjectSearch({
         </div>
       )}
       {isOpen && results.length > 0 && (
-        <ul className="absolute z-50 mt-1 w-full rounded-lg border border-border bg-card shadow-lg">
+        <ul className="absolute z-50 mt-1 max-h-72 w-full overflow-y-auto rounded-lg border border-border bg-card shadow-lg">
           {results.map((project) => (
             <li key={project.project_id}>
               <button
