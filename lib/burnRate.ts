@@ -2,6 +2,13 @@ import type { ProjectData } from "./scoro";
 import type { RAGStatus } from "./formatters";
 import { getRAGStatus } from "./formatters";
 
+/** Safely coerce a Scoro value (may be string, null, undefined) to number. */
+function num(value: unknown): number {
+  if (value == null) return 0;
+  const n = Number(value);
+  return isNaN(n) ? 0 : n;
+}
+
 export interface OverviewSummary {
   totalQuotedHours: number;
   totalLoggedHours: number;
@@ -72,7 +79,7 @@ export function calculateOverview(data: ProjectData): OverviewSummary {
   }
 
   const totalLoggedHours = timeEntries.reduce(
-    (sum, e) => sum + (e.duration || 0),
+    (sum, e) => sum + num(e.duration),
     0
   );
 
@@ -81,27 +88,27 @@ export function calculateOverview(data: ProjectData): OverviewSummary {
   for (const quote of quotes) {
     if (quote.lines) {
       for (const line of quote.lines) {
-        totalQuotedHours += line.amount || 0;
-        totalQuotedValue += line.sum || 0;
+        totalQuotedHours += num(line.amount);
+        totalQuotedValue += num(line.sum);
       }
     } else if (quote.sum) {
-      totalQuotedValue += quote.sum;
+      totalQuotedValue += num(quote.sum);
     }
   }
 
   const totalActualCost = timeEntries.reduce(
-    (sum, e) => sum + (e.duration || 0) * (e.cost_rate || 0),
+    (sum, e) => sum + num(e.duration) * num(e.cost_rate),
     0
   );
 
-  const totalInvoiced = invoices.reduce((sum, i) => sum + (i.sum || 0), 0);
+  const totalInvoiced = invoices.reduce((sum, i) => sum + num(i.sum), 0);
 
   const hoursBurnPercent =
     totalQuotedHours > 0 ? (totalLoggedHours / totalQuotedHours) * 100 : 0;
   const costBurnPercent =
     totalQuotedValue > 0 ? (totalActualCost / totalQuotedValue) * 100 : 0;
 
-  const budget = project.budget || totalQuotedValue;
+  const budget = num(project.budget) || totalQuotedValue;
   const budgetRemaining = budget - totalActualCost;
 
   return {
@@ -130,8 +137,8 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
       for (const line of quote.lines) {
         const key = line.comment || line.product_name || `line-${line.product_id}`;
         const existing = quoteLookup.get(key) || { hours: 0, value: 0 };
-        existing.hours += line.amount || 0;
-        existing.value += line.sum || 0;
+        existing.hours += num(line.amount);
+        existing.value += num(line.sum);
         quoteLookup.set(key, existing);
       }
     }
@@ -171,12 +178,12 @@ export function calculateByTask(data: ProjectData): TaskBurnRate[] {
       };
       taskMap.set(activityId, taskEntry);
     }
-    taskEntry.loggedHours += entry.duration || 0;
-    taskEntry.actualCost += (entry.duration || 0) * (entry.cost_rate || 0);
+    taskEntry.loggedHours += num(entry.duration);
+    taskEntry.actualCost += num(entry.duration) * num(entry.cost_rate);
     taskEntry.entries.push({
       userName: entry.user_name || `User ${entry.user_id}`,
       date: getEntryDate(entry as unknown as Record<string, string>) || "unknown",
-      duration: entry.duration,
+      duration: num(entry.duration),
       description: entry.description,
     });
   }
@@ -262,8 +269,8 @@ export function calculateByPerson(data: ProjectData): PersonBurnRate[] {
       personMap.set(userId, person);
     }
 
-    const hours = entry.duration || 0;
-    const cost = hours * (entry.cost_rate || 0);
+    const hours = num(entry.duration);
+    const cost = hours * num(entry.cost_rate);
     person.totalHours += hours;
     person.totalCost += cost;
 
@@ -314,7 +321,7 @@ export function calculateMonthly(data: ProjectData): MonthlyBurnRate[] {
   for (const quote of quotes) {
     if (quote.lines) {
       for (const line of quote.lines) {
-        totalQuotedHours += line.amount || 0;
+        totalQuotedHours += num(line.amount);
       }
     }
   }
@@ -329,7 +336,7 @@ export function calculateMonthly(data: ProjectData): MonthlyBurnRate[] {
     if (!date) continue;
     const month = date.substring(0, 7);
     const existing = monthMap.get(month) || { hours: 0, invoiced: 0 };
-    existing.hours += entry.duration || 0;
+    existing.hours += num(entry.duration);
     monthMap.set(month, existing);
   }
 
@@ -337,7 +344,7 @@ export function calculateMonthly(data: ProjectData): MonthlyBurnRate[] {
     if (invoice.date) {
       const month = invoice.date.substring(0, 7);
       const existing = monthMap.get(month) || { hours: 0, invoiced: 0 };
-      existing.invoiced += invoice.sum || 0;
+      existing.invoiced += num(invoice.sum);
       monthMap.set(month, existing);
     }
   }
