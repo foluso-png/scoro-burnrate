@@ -34,6 +34,9 @@ yarn-error.log*
 .env*.local
 .env
 
+# generated data
+/data
+
 # vercel
 .vercel
 
