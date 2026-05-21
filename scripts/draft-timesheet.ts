@@ -123,21 +123,8 @@ interface MatchResult {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function todayISO(hour: number, minute: number = 0): string {
-  const d = new Date();
-  d.setHours(hour, minute, 0, 0);
-  const offset = -d.getTimezoneOffset();
-  const sign = offset >= 0 ? "+" : "-";
-  const absOffset = Math.abs(offset);
-  const hh = String(Math.floor(absOffset / 60)).padStart(2, "0");
-  const mm = String(absOffset % 60).padStart(2, "0");
-  const yyyy = d.getFullYear();
-  const mo = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const hr = String(d.getHours()).padStart(2, "0");
-  const mn = String(d.getMinutes()).padStart(2, "0");
-  // We want the specified hour/minute, not current time
-  return `${yyyy}-${mo}-${dd}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00${sign}${hh}:${mm}`;
+function makeISO(date: string, hour: number, minute: number = 0): string {
+  return `${date}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00+01:00`;
 }
 
 function dateStr(): string {
@@ -182,41 +169,49 @@ function askUser(question: string): Promise<string> {
 // Mock calendar events
 // ---------------------------------------------------------------------------
 function getMockEvents(): CalendarEvent[] {
+  const DAY = "2026-05-19"; // Monday 19 May 2026
   return [
     {
-      id: "mock-1",
-      title: "Wella FY27 retainer review",
-      start: todayISO(9, 0),
-      end: todayISO(9, 45),
-      attendees: ["foluso@campfire.co.uk", "sarah.jones@wella.com", "mike.chen@wella.com"],
+      id: "ev-1",
+      title: "Email CS team — Quote Builder launch",
+      start: makeISO(DAY, 9, 0),
+      end: makeISO(DAY, 10, 0),
+      attendees: ["foluso@campfire.co.uk"],
     },
     {
-      id: "mock-2",
-      title: "St Tropez summer shoot brief",
-      start: todayISO(10, 0),
-      end: todayISO(11, 0),
-      attendees: ["foluso@campfire.co.uk", "kate@campfire.co.uk"],
+      id: "ev-2",
+      title: "Quote Builder development",
+      start: makeISO(DAY, 10, 0),
+      end: makeISO(DAY, 11, 0),
+      attendees: ["foluso@campfire.co.uk"],
     },
     {
-      id: "mock-3",
-      title: "Team standup",
-      start: todayISO(11, 30),
-      end: todayISO(12, 0),
-      attendees: ["foluso@campfire.co.uk", "joe@campfire.co.uk", "hannah.griffin@campfire.co.uk"],
+      id: "ev-3",
+      title: "Catch-up with Leah",
+      start: makeISO(DAY, 11, 0),
+      end: makeISO(DAY, 11, 30),
+      attendees: ["foluso@campfire.co.uk", "leah@campfire.co.uk"],
     },
     {
-      id: "mock-4",
-      title: "Persil creative review with Unilever",
-      start: todayISO(14, 0),
-      end: todayISO(15, 0),
-      attendees: ["foluso@campfire.co.uk", "claire.m@unilever.com"],
+      id: "ev-4",
+      title: "Quote Builder development",
+      start: makeISO(DAY, 11, 30),
+      end: makeISO(DAY, 13, 0),
+      attendees: ["foluso@campfire.co.uk"],
     },
     {
-      id: "mock-5",
-      title: "Quick chat re: timelines",
-      start: todayISO(16, 0),
-      end: todayISO(16, 15),
-      attendees: ["foluso@campfire.co.uk", "joe@campfire.co.uk"],
+      id: "ev-5",
+      title: "Emails to Joe and Alex",
+      start: makeISO(DAY, 14, 0),
+      end: makeISO(DAY, 14, 30),
+      attendees: ["foluso@campfire.co.uk", "joe@campfire.co.uk", "alex@campfire.co.uk"],
+    },
+    {
+      id: "ev-6",
+      title: "Quote Builder work + Slack",
+      start: makeISO(DAY, 14, 30),
+      end: makeISO(DAY, 17, 0),
+      attendees: ["foluso@campfire.co.uk"],
     },
   ];
 }
@@ -430,7 +425,7 @@ async function main() {
 
   // 2. Generate mock events
   const events = getMockEvents();
-  console.log(`${events.length} calendar events for today:\n`);
+  console.log(`${events.length} calendar events for Mon 19 May 2026:\n`);
   for (const e of events) {
     const slot = timeSlot(e.start, e.end);
     const attendeeStr = e.attendees.filter((a) => !a.includes("campfire")).join(", ") || "(internal only)";
