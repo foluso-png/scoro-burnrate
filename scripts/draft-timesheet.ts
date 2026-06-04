@@ -423,9 +423,32 @@ async function main() {
   );
   console.log(`Loaded ${activeProjects.length} active projects from lookup.\n`);
 
-  // 2. Generate mock events
-  const events = getMockEvents();
-  console.log(`${events.length} calendar events for Mon 19 May 2026:\n`);
+  // 2. Load events (real calendar or mock fallback)
+  const todayEventsPath = path.resolve(__dirname, "..", "data", "today-events.json");
+  let events: CalendarEvent[];
+  let usingRealEvents = false;
+
+  if (fs.existsSync(todayEventsPath)) {
+    const raw = JSON.parse(fs.readFileSync(todayEventsPath, "utf-8"));
+    if (Array.isArray(raw) && raw.length > 0) {
+      const today = dateStr();
+      events = raw.map((e: { start: string; end: string; title: string; attendees: string[]; isInternal: boolean }, i: number) => ({
+        id: `ev-${i + 1}`,
+        title: e.title,
+        start: `${today}T${e.start}:00+01:00`,
+        end: `${today}T${e.end}:00+01:00`,
+        attendees: e.isInternal ? ["internal@campfire.co.uk"] : e.attendees.map((d: string) => `contact@${d}`),
+      }));
+      usingRealEvents = true;
+    } else {
+      events = getMockEvents();
+    }
+  } else {
+    events = getMockEvents();
+  }
+
+  console.log(usingRealEvents ? "Using real calendar events" : "Using mock events");
+  console.log(`${events.length} calendar events:\n`);
   for (const e of events) {
     const slot = timeSlot(e.start, e.end);
     const attendeeStr = e.attendees.filter((a) => !a.includes("campfire")).join(", ") || "(internal only)";
