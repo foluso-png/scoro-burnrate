@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/run-copilot",
+      "schedule": "0 16 * * 1-5"
+    }
+  ]
+}
