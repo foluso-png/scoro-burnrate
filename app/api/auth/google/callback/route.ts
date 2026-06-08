@@ -48,7 +48,7 @@ export async function GET(request: NextRequest) {
       scope: data.scope,
       expiry_date: Date.now() + data.expires_in * 1000,
     };
-    saveTokens(tokens);
+    await saveTokens(tokens);
 
     const url = new URL("/connect", request.url);
     url.searchParams.set("status", "success");

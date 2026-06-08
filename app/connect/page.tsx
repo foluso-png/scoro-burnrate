@@ -6,7 +6,7 @@ export default async function ConnectPage({
   searchParams: Promise<{ status?: string; message?: string }>;
 }) {
   const params = await searchParams;
-  const connected = isConnected();
+  const connected = await isConnected();
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
