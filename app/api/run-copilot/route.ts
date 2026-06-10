@@ -521,30 +521,42 @@ async function writeDraftsToScoro(
 // ---------------------------------------------------------------------------
 // Step 5: Slack notification
 // ---------------------------------------------------------------------------
-async function sendSlackMessage(text: string): Promise<void> {
+async function sendSlackMessage(text: string): Promise<string> {
   const slackToken = process.env.SLACK_BOT_TOKEN;
   const slackUser = process.env.SLACK_USER_ID;
 
   if (!slackToken || !slackUser) {
     console.log("Slack not configured, skipping notification");
-    return;
+    return "skipped: no token";
   }
 
-  const res = await fetch("https://slack.com/api/chat.postMessage", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${slackToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      channel: slackUser,
-      text,
-    }),
-  });
+  try {
+    const res = await fetch("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${slackToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: slackUser,
+        text,
+      }),
+    });
 
-  if (!res.ok) {
-    const body = await res.text();
-    console.error(`Slack API failed: ${res.status} ${body}`);
+    if (!res.ok) {
+      const body = await res.text();
+      return `failed: HTTP ${res.status} ${body}`;
+    }
+
+    const data = await res.json();
+    if (!data.ok) {
+      return `failed: ${data.error || "unknown Slack API error"}`;
+    }
+
+    return "sent";
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `failed: ${msg}`;
   }
 }
 
@@ -628,12 +640,13 @@ export async function GET(request: NextRequest) {
         month: "long",
         year: "numeric",
       });
-      await sendSlackMessage(
+      const slackResult = await sendSlackMessage(
         `\ud83d\udcc5 Timesheet Co-pilot ran \u2014 ${today}\n\nNo events found on the calendar today. Nothing written to Scoro.`
       );
       return NextResponse.json({
         message: "No events today",
         entries: [],
+        slack_result: slackResult,
       });
     }
 
@@ -650,7 +663,9 @@ export async function GET(request: NextRequest) {
     const { written, skipped } = await writeDraftsToScoro(events, matches);
 
     // 6. Send Slack notification
-    await sendSlackMessage(formatSlackSummary(events, written, skipped, matches));
+    const slackResult = await sendSlackMessage(
+      formatSlackSummary(events, written, skipped, matches)
+    );
 
     // 7. Return summary
     const successCount = written.filter((w) => !w.error).length;
@@ -661,6 +676,7 @@ export async function GET(request: NextRequest) {
       matched: successCount,
       failed: failCount,
       skipped: skipped.length,
+      slack_result: slackResult,
       written,
       skippedEvents: skipped.map((s) => ({
         event_id: s.event_id,
