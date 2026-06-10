@@ -521,12 +521,7 @@ async function writeDraftsToScoro(
 // ---------------------------------------------------------------------------
 // Step 5: Slack notification
 // ---------------------------------------------------------------------------
-async function sendSlackSummary(
-  events: CalendarEvent[],
-  written: WriteResult[],
-  skipped: MatchResult[],
-  matches: MatchResult[]
-): Promise<void> {
+async function sendSlackMessage(text: string): Promise<void> {
   const slackToken = process.env.SLACK_BOT_TOKEN;
   const slackUser = process.env.SLACK_USER_ID;
 
@@ -535,6 +530,30 @@ async function sendSlackSummary(
     return;
   }
 
+  const res = await fetch("https://slack.com/api/chat.postMessage", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${slackToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      channel: slackUser,
+      text,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    console.error(`Slack API failed: ${res.status} ${body}`);
+  }
+}
+
+function formatSlackSummary(
+  events: CalendarEvent[],
+  written: WriteResult[],
+  skipped: MatchResult[],
+  matches: MatchResult[]
+): string {
   const today = new Date().toLocaleDateString("en-GB", {
     weekday: "long",
     day: "numeric",
@@ -542,8 +561,13 @@ async function sendSlackSummary(
     year: "numeric",
   });
 
-  const matchedLines = written
-    .filter((w) => !w.error)
+  const successfulWrites = written.filter((w) => !w.error);
+
+  if (successfulWrites.length === 0) {
+    return `\ud83d\udcc5 Timesheet Co-pilot ran \u2014 ${today}\n\nNo billable events found today. Nothing written to Scoro.`;
+  }
+
+  const matchedLines = successfulWrites
     .map((w) => {
       const match = matches.find(
         (m) => m.project_name === w.project_name && m.task_title === w.task_title
@@ -556,46 +580,28 @@ async function sendSlackSummary(
     })
     .join("\n");
 
-  const skippedNames = skipped
-    .map((s) => {
-      const event = events.find((e) => e.id === s.event_id);
-      return event ? event.title : s.event_id;
-    })
-    .join(", ");
-
-  const failedEntries = written.filter((w) => w.error);
-  const failedLines = failedEntries
-    .map((w) => `\u2022 ${w.event_title}: ${w.error}`)
-    .join("\n");
-
-  let message = `\ud83d\udcc5 Timesheet draft ready \u2014 ${today}\n\nMatched ${written.filter((w) => !w.error).length} events:\n${matchedLines}`;
+  let message = `\ud83d\udcc5 Timesheet draft ready \u2014 ${today}\n\nMatched ${successfulWrites.length} events:\n${matchedLines}`;
 
   if (skipped.length > 0) {
+    const skippedNames = skipped
+      .map((s) => {
+        const event = events.find((e) => e.id === s.event_id);
+        return event ? event.title : s.event_id;
+      })
+      .join(", ");
     message += `\n\nSkipped: ${skippedNames}`;
   }
 
+  const failedEntries = written.filter((w) => w.error);
   if (failedEntries.length > 0) {
+    const failedLines = failedEntries
+      .map((w) => `\u2022 ${w.event_title}: ${w.error}`)
+      .join("\n");
     message += `\n\nFailed to write:\n${failedLines}`;
   }
 
   message += "\n\nWritten to Scoro as drafts. Review and submit by Friday.";
-
-  const res = await fetch("https://slack.com/api/chat.postMessage", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${slackToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      channel: slackUser,
-      text: message,
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    console.error(`Slack API failed: ${res.status} ${body}`);
-  }
+  return message;
 }
 
 // ---------------------------------------------------------------------------
@@ -616,6 +622,15 @@ export async function GET(request: NextRequest) {
     const events = await fetchTodayEvents(accessToken);
 
     if (events.length === 0) {
+      const today = new Date().toLocaleDateString("en-GB", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+      });
+      await sendSlackMessage(
+        `\ud83d\udcc5 Timesheet Co-pilot ran \u2014 ${today}\n\nNo events found on the calendar today. Nothing written to Scoro.`
+      );
       return NextResponse.json({
         message: "No events today",
         entries: [],
@@ -635,7 +650,7 @@ export async function GET(request: NextRequest) {
     const { written, skipped } = await writeDraftsToScoro(events, matches);
 
     // 6. Send Slack notification
-    await sendSlackSummary(events, written, skipped, matches);
+    await sendSlackMessage(formatSlackSummary(events, written, skipped, matches));
 
     // 7. Return summary
     const successCount = written.filter((w) => !w.error).length;
