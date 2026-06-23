@@ -1,12 +1,9 @@
-import { isConnected } from "@/lib/google-auth";
-
 export default async function ConnectPage({
   searchParams,
 }: {
   searchParams: Promise<{ status?: string; message?: string }>;
 }) {
   const params = await searchParams;
-  const connected = await isConnected();
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
@@ -27,34 +24,18 @@ export default async function ConnectPage({
           </div>
         )}
 
-        {connected ? (
-          <div>
-            <p className="text-green-700 font-medium mb-4">
-              ✓ Google Calendar connected
-            </p>
-            <form action="/api/auth/google/disconnect" method="POST">
-              <button
-                type="submit"
-                className="w-full px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition-colors"
-              >
-                Disconnect
-              </button>
-            </form>
-          </div>
-        ) : (
-          <div>
-            <p className="text-gray-600 mb-4">
-              Connect your Google Calendar so the matcher can read your real
-              events.
-            </p>
-            <a
-              href="/api/auth/google"
-              className="block text-center w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-            >
-              Connect Google Calendar
-            </a>
-          </div>
-        )}
+        <div>
+          <p className="text-gray-600 mb-4">
+            Connect your Google Calendar so the matcher can read your real
+            events.
+          </p>
+          <a
+            href="/api/auth/google"
+            className="block text-center w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+          >
+            Connect Google Calendar
+          </a>
+        </div>
       </div>
     </div>
   );
