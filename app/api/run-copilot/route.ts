@@ -627,8 +627,9 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // 1. Get Google access token
-    const accessToken = await getAccessToken();
+    // 1. Get Google access token (single-user for now; multi-user loop comes next)
+    const slackId = process.env.SLACK_USER_ID!;
+    const accessToken = await getAccessToken(slackId);
 
     // 2. Fetch today's calendar events
     const events = await fetchTodayEvents(accessToken);
