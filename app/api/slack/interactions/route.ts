@@ -3,6 +3,11 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
+import {
+  loadConversation,
+  saveConversation,
+  clearConversation,
+} from "@/lib/conversation";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -29,6 +34,72 @@ function verifySlackSignature(
   return crypto.timingSafeEqual(
     Buffer.from(expected),
     Buffer.from(signature)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Slack response helpers
+// ---------------------------------------------------------------------------
+function slackResponse(text: string): NextResponse {
+  return NextResponse.json({
+    response_type: "ephemeral",
+    replace_original: false,
+    text,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Button handlers
+// ---------------------------------------------------------------------------
+async function handleLooksRight(userId: string): Promise<NextResponse> {
+  const convo = await loadConversation(userId);
+  if (!convo) {
+    return slackResponse("No active timesheet session found. Run the Co-pilot first.");
+  }
+
+  convo.step = "complete";
+  await clearConversation(userId);
+
+  const approvedCount = convo.drafts.filter((d) => d.approved).length;
+  return slackResponse(
+    `\u2705 All good. ${approvedCount} draft${approvedCount === 1 ? "" : "s"} confirmed in Scoro. Have a good evening.`
+  );
+}
+
+async function handleAddTime(userId: string): Promise<NextResponse> {
+  const convo = await loadConversation(userId);
+  if (!convo) {
+    return slackResponse("No active timesheet session found. Run the Co-pilot first.");
+  }
+
+  convo.step = "editing";
+  await saveConversation(convo);
+
+  return slackResponse(
+    "What did you work on? Type something like:\n\u2022 _\"2 hours on the Garnier deck\"_\n\u2022 _\"30 mins L'Or\u00e9al creative review\"_\n\nI'll match it to a project and add the time entry."
+  );
+}
+
+async function handleFixEntry(userId: string): Promise<NextResponse> {
+  const convo = await loadConversation(userId);
+  if (!convo) {
+    return slackResponse("No active timesheet session found. Run the Co-pilot first.");
+  }
+
+  const draftList = convo.drafts
+    .filter((d) => d.approved)
+    .map((d, i) => `${i + 1}. ${d.eventTitle} \u2192 ${d.projectName || "unmatched"}`)
+    .join("\n");
+
+  if (!draftList) {
+    return slackResponse("No entries to fix. Try *Add time* instead.");
+  }
+
+  // Keep step as review_matches for now; the fix flow will be built next
+  await saveConversation(convo);
+
+  return slackResponse(
+    `Which entry needs fixing?\n\n${draftList}\n\nReply with the number or describe what's wrong. (Fix flow coming soon.)`
   );
 }
 
@@ -65,18 +136,29 @@ export async function POST(request: NextRequest) {
   }
 
   const payload = JSON.parse(payloadStr);
+  const userId: string = payload.user?.id || "";
+  const actions: Array<{ action_id: string; value?: string }> =
+    payload.actions || [];
 
-  // Log the interaction
-  const user = payload.user?.username || payload.user?.id || "unknown";
-  const userId = payload.user?.id || "unknown";
-  const actions = payload.actions || [];
-
-  for (const action of actions) {
-    console.log(
-      `Slack interaction: user=${user} (${userId}) action_id=${action.action_id} value=${action.value ?? action.selected_option?.value ?? "none"}`
-    );
+  if (!userId || actions.length === 0) {
+    return NextResponse.json({ text: "Nothing to do." });
   }
 
-  // Acknowledge within 3 seconds — Slack requires a 200 response promptly
-  return NextResponse.json({ text: "Got it, processing..." });
+  const actionId = actions[0].action_id;
+
+  console.log(
+    `Slack interaction: user=${payload.user?.username || userId} action_id=${actionId}`
+  );
+
+  switch (actionId) {
+    case "looks_right":
+      return handleLooksRight(userId);
+    case "add_time":
+      return handleAddTime(userId);
+    case "fix_entry":
+      return handleFixEntry(userId);
+    default:
+      console.warn(`Unknown action_id: ${actionId}`);
+      return slackResponse(`Unknown action: ${actionId}`);
+  }
 }

@@ -15,6 +15,12 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getAccessToken } from "@/lib/google-auth";
+import {
+  newConversation,
+  saveConversation,
+  CalendarEventSummary,
+  DraftEntry,
+} from "@/lib/conversation";
 import Anthropic from "@anthropic-ai/sdk";
 
 // ---------------------------------------------------------------------------
@@ -521,13 +527,21 @@ async function writeDraftsToScoro(
 // ---------------------------------------------------------------------------
 // Step 5: Slack notification
 // ---------------------------------------------------------------------------
-async function sendSlackMessage(text: string): Promise<string> {
+interface SlackPostResult {
+  status: string;
+  channelId: string | null;
+  messageTs: string | null;
+}
+
+async function postSlackMessage(
+  body: Record<string, unknown>
+): Promise<SlackPostResult> {
   const slackToken = process.env.SLACK_BOT_TOKEN;
   const slackUser = process.env.SLACK_USER_ID;
 
   if (!slackToken || !slackUser) {
     console.log("Slack not configured, skipping notification");
-    return "skipped: no token";
+    return { status: "skipped: no token", channelId: null, messageTs: null };
   }
 
   try {
@@ -537,35 +551,69 @@ async function sendSlackMessage(text: string): Promise<string> {
         Authorization: `Bearer ${slackToken}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        channel: slackUser,
-        text,
-      }),
+      body: JSON.stringify({ channel: slackUser, ...body }),
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      return `failed: HTTP ${res.status} ${body}`;
+      const text = await res.text();
+      return {
+        status: `failed: HTTP ${res.status} ${text}`,
+        channelId: null,
+        messageTs: null,
+      };
     }
 
     const data = await res.json();
     if (!data.ok) {
-      return `failed: ${data.error || "unknown Slack API error"}`;
+      return {
+        status: `failed: ${data.error || "unknown Slack API error"}`,
+        channelId: null,
+        messageTs: null,
+      };
     }
 
-    return "sent";
+    return {
+      status: "sent",
+      channelId: data.channel || null,
+      messageTs: data.ts || null,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return `failed: ${msg}`;
+    return { status: `failed: ${msg}`, channelId: null, messageTs: null };
   }
 }
 
-function formatSlackSummary(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildActionButtons(): Record<string, unknown> {
+  return {
+    type: "actions",
+    elements: [
+      {
+        type: "button",
+        text: { type: "plain_text", text: "\u2705 Looks right", emoji: true },
+        action_id: "looks_right",
+        style: "primary",
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "\u2795 Add time", emoji: true },
+        action_id: "add_time",
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "\u270f\ufe0f Fix an entry", emoji: true },
+        action_id: "fix_entry",
+      },
+    ],
+  };
+}
+
+function formatSlackBlocks(
   events: CalendarEvent[],
   written: WriteResult[],
   skipped: MatchResult[],
   matches: MatchResult[]
-): string {
+): { text: string; blocks: Record<string, unknown>[] } {
   const today = new Date().toLocaleDateString("en-GB", {
     weekday: "long",
     day: "numeric",
@@ -576,7 +624,14 @@ function formatSlackSummary(
   const successfulWrites = written.filter((w) => !w.error);
 
   if (successfulWrites.length === 0) {
-    return `\ud83d\udcc5 Timesheet Co-pilot ran \u2014 ${today}\n\nNo billable events found today. Nothing written to Scoro.`;
+    const text = `\ud83d\udcc5 Timesheet Co-pilot ran \u2014 ${today}\n\nNo billable events found today. Nothing written to Scoro.`;
+    return {
+      text,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text } },
+        buildActionButtons(),
+      ],
+    };
   }
 
   const matchedLines = successfulWrites
@@ -584,15 +639,13 @@ function formatSlackSummary(
       const match = matches.find(
         (m) => m.project_name === w.project_name && m.task_title === w.task_title
       );
-      const event = events.find(
-        (e) => match && e.id === match.event_id
-      );
+      const event = events.find((e) => match && e.id === match.event_id);
       const time = event ? timeSlot(event.start, event.end) : "";
       return `\u2022 ${time} ${w.event_title} \u2192 ${w.project_name} (${w.confidence})`;
     })
     .join("\n");
 
-  let message = `\ud83d\udcc5 Timesheet draft ready \u2014 ${today}\n\nMatched ${successfulWrites.length} events:\n${matchedLines}`;
+  let body = `*Matched ${successfulWrites.length} events:*\n${matchedLines}`;
 
   if (skipped.length > 0) {
     const skippedNames = skipped
@@ -601,7 +654,7 @@ function formatSlackSummary(
         return event ? event.title : s.event_id;
       })
       .join(", ");
-    message += `\n\nSkipped: ${skippedNames}`;
+    body += `\n\n*Skipped:* ${skippedNames}`;
   }
 
   const failedEntries = written.filter((w) => w.error);
@@ -609,11 +662,29 @@ function formatSlackSummary(
     const failedLines = failedEntries
       .map((w) => `\u2022 ${w.event_title}: ${w.error}`)
       .join("\n");
-    message += `\n\nFailed to write:\n${failedLines}`;
+    body += `\n\n*Failed to write:*\n${failedLines}`;
   }
 
-  message += "\n\nWritten to Scoro as drafts. Review and submit by Friday.";
-  return message;
+  body += "\n\nWritten to Scoro as drafts. Review and submit by Friday.";
+
+  const text = `\ud83d\udcc5 Timesheet draft ready \u2014 ${today}\n\n${body}`;
+
+  return {
+    text,
+    blocks: [
+      {
+        type: "header",
+        text: {
+          type: "plain_text",
+          text: `\ud83d\udcc5 Timesheet draft ready \u2014 ${today}`,
+          emoji: true,
+        },
+      },
+      { type: "section", text: { type: "mrkdwn", text: body } },
+      { type: "divider" },
+      buildActionButtons(),
+    ],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -641,13 +712,26 @@ export async function GET(request: NextRequest) {
         month: "long",
         year: "numeric",
       });
-      const slackResult = await sendSlackMessage(
-        `\ud83d\udcc5 Timesheet Co-pilot ran \u2014 ${today}\n\nNo events found on the calendar today. Nothing written to Scoro.`
-      );
+      const text = `\ud83d\udcc5 Timesheet Co-pilot ran \u2014 ${today}\n\nNo events found on the calendar today. Nothing written to Scoro.`;
+      const slackPost = await postSlackMessage({
+        text,
+        blocks: [
+          { type: "section", text: { type: "mrkdwn", text } },
+          buildActionButtons(),
+        ],
+      });
+
+      // Create conversation state even with no events so user can "Add time"
+      const convo = newConversation(slackId, []);
+      convo.step = "review_matches";
+      convo.slackChannelId = slackPost.channelId;
+      convo.messageTs = slackPost.messageTs;
+      await saveConversation(convo);
+
       return NextResponse.json({
         message: "No events today",
         entries: [],
-        slack_result: slackResult,
+        slack_result: slackPost.status,
       });
     }
 
@@ -663,12 +747,46 @@ export async function GET(request: NextRequest) {
     // 5. Write approved drafts to Scoro
     const { written, skipped } = await writeDraftsToScoro(events, matches);
 
-    // 6. Send Slack notification
-    const slackResult = await sendSlackMessage(
-      formatSlackSummary(events, written, skipped, matches)
+    // 6. Send Slack notification with interactive buttons
+    const { text: summaryText, blocks } = formatSlackBlocks(
+      events,
+      written,
+      skipped,
+      matches
     );
+    const slackPost = await postSlackMessage({ text: summaryText, blocks });
 
-    // 7. Return summary
+    // 7. Create conversation state so user can interact via buttons
+    const eventSummaries: CalendarEventSummary[] = events.map((e) => ({
+      id: e.id,
+      title: e.title,
+      start: e.start,
+      end: e.end,
+      isInternal: e.isInternal,
+    }));
+    const drafts: DraftEntry[] = matches.map((m) => ({
+      eventId: m.event_id,
+      eventTitle: events.find((e) => e.id === m.event_id)?.title || "",
+      projectId: m.project_id,
+      projectName: m.project_name,
+      taskId: m.task_id,
+      taskTitle: m.task_title,
+      confidence: m.confidence,
+      description: m.description,
+      approved: m.confidence !== "low" && m.project_id !== null && m.task_id !== null,
+      scoroEntryId:
+        written.find((w) => w.project_name === m.project_name && w.task_title === m.task_title)
+          ?.scoro_entry_id ?? null,
+    }));
+
+    const convo = newConversation(slackId, eventSummaries);
+    convo.step = "review_matches";
+    convo.drafts = drafts;
+    convo.slackChannelId = slackPost.channelId;
+    convo.messageTs = slackPost.messageTs;
+    await saveConversation(convo);
+
+    // 8. Return summary
     const successCount = written.filter((w) => !w.error).length;
     const failCount = written.filter((w) => w.error).length;
 
@@ -677,7 +795,7 @@ export async function GET(request: NextRequest) {
       matched: successCount,
       failed: failCount,
       skipped: skipped.length,
-      slack_result: slackResult,
+      slack_result: slackPost.status,
       written,
       skippedEvents: skipped.map((s) => ({
         event_id: s.event_id,
