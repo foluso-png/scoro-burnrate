@@ -35,14 +35,28 @@ export interface DraftEntry {
   scoroEntryId: number | null; // set after write
 }
 
+export interface PendingEntry {
+  text: string;             // original user input
+  durationMinutes: number;  // parsed duration
+  projectId: number | null;
+  projectName: string | null;
+  clientName: string | null;
+  taskId: number | null;
+  taskTitle: string | null;
+  confidence: "high" | "medium" | "low";
+  description: string;
+  isInternal: boolean;
+}
+
 export interface ConversationState {
   slackUserId: string;
   step: ConversationStep;
   events: CalendarEventSummary[];
   drafts: DraftEntry[];
-  slackChannelId: string | null;   // DM channel for follow-up messages
-  messageTs: string | null;        // timestamp of the last bot message (for updates)
-  createdAt: string;               // ISO timestamp
+  pendingEntry: PendingEntry | null; // set during confirming step
+  slackChannelId: string | null;     // DM channel for follow-up messages
+  messageTs: string | null;          // timestamp of the last bot message (for updates)
+  createdAt: string;                 // ISO timestamp
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +99,7 @@ export function newConversation(
     step: "awaiting_events",
     events,
     drafts: [],
+    pendingEntry: null,
     slackChannelId: null,
     messageTs: null,
     createdAt: new Date().toISOString(),

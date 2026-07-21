@@ -7,6 +7,7 @@ import {
   loadConversation,
   saveConversation,
   clearConversation,
+  DraftEntry,
 } from "@/lib/conversation";
 
 // ---------------------------------------------------------------------------
@@ -104,6 +105,65 @@ async function handleFixEntry(userId: string): Promise<NextResponse> {
 }
 
 // ---------------------------------------------------------------------------
+// Confirm / reject pending entry
+// ---------------------------------------------------------------------------
+function formatDuration(mins: number): string {
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+async function handleConfirmEntry(userId: string): Promise<NextResponse> {
+  const convo = await loadConversation(userId);
+  if (!convo || !convo.pendingEntry) {
+    return slackResponse("Nothing to confirm. Try *Add time* first.");
+  }
+
+  const pe = convo.pendingEntry;
+
+  const draft: DraftEntry = {
+    eventId: `manual-${Date.now()}`,
+    eventTitle: pe.text,
+    projectId: pe.projectId,
+    projectName: pe.projectName,
+    taskId: pe.taskId,
+    taskTitle: pe.taskTitle,
+    confidence: pe.confidence,
+    description: pe.description,
+    approved: true,
+    scoroEntryId: null,
+  };
+
+  convo.drafts.push(draft);
+  convo.pendingEntry = null;
+  convo.step = "review_matches";
+  await saveConversation(convo);
+
+  const dur = formatDuration(pe.durationMinutes);
+  const project = pe.projectName || "unknown project";
+
+  return slackResponse(
+    `\u2705 Added: ${dur} on ${project}.\n\nAnything else? Type another entry, or tap *Looks right* on the original message when you're done.`
+  );
+}
+
+async function handleRejectEntry(userId: string): Promise<NextResponse> {
+  const convo = await loadConversation(userId);
+  if (!convo || !convo.pendingEntry) {
+    return slackResponse("Nothing to reject.");
+  }
+
+  convo.pendingEntry = null;
+  convo.step = "editing";
+  await saveConversation(convo);
+
+  return slackResponse(
+    "No worries. Try rephrasing with a clearer project or client name, like:\n\u2022 _\"1h Wella TikTok edits\"_\n\u2022 _\"45 mins Garnier shoot brief\"_"
+  );
+}
+
+// ---------------------------------------------------------------------------
 // POST handler — Slack interactivity callback
 // ---------------------------------------------------------------------------
 export async function POST(request: NextRequest) {
@@ -157,6 +217,10 @@ export async function POST(request: NextRequest) {
       return handleAddTime(userId);
     case "fix_entry":
       return handleFixEntry(userId);
+    case "confirm_entry":
+      return handleConfirmEntry(userId);
+    case "reject_entry":
+      return handleRejectEntry(userId);
     default:
       console.warn(`Unknown action_id: ${actionId}`);
       return slackResponse(`Unknown action: ${actionId}`);
