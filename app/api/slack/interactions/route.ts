@@ -9,6 +9,7 @@ import {
   clearConversation,
   DraftEntry,
 } from "@/lib/conversation";
+import { finaliseAndWrite } from "@/lib/scoro-writer";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -58,13 +59,38 @@ async function handleLooksRight(userId: string): Promise<NextResponse> {
     return slackResponse("No active timesheet session found. Run the Co-pilot first.");
   }
 
-  convo.step = "complete";
+  const approvedDrafts = convo.drafts.filter((d) => d.approved);
+  if (approvedDrafts.length === 0) {
+    await clearConversation(userId);
+    return slackResponse("\u2705 No entries to write. Session closed.");
+  }
+
+  // Write all approved drafts to Scoro
+  const results = await finaliseAndWrite(convo);
   await clearConversation(userId);
 
-  const approvedCount = convo.drafts.filter((d) => d.approved).length;
-  return slackResponse(
-    `\u2705 All good. ${approvedCount} draft${approvedCount === 1 ? "" : "s"} confirmed in Scoro. Have a good evening.`
-  );
+  // Build summary
+  const written = results.filter((r) => !r.error && r.action !== "skipped");
+  const failed = results.filter((r) => r.error);
+
+  let summary = `\u2705 Done. ${written.length} entry${written.length === 1 ? "" : "s"} written to Scoro:\n`;
+  summary += written
+    .map(
+      (r) =>
+        `\u2022 ${formatDuration(r.durationMinutes)} ${r.projectName || "unknown"} (${r.action})`
+    )
+    .join("\n");
+
+  if (failed.length > 0) {
+    summary += `\n\n\u26a0\ufe0f ${failed.length} failed:\n`;
+    summary += failed
+      .map((r) => `\u2022 ${r.eventTitle}: ${r.error}`)
+      .join("\n");
+  }
+
+  summary += "\n\nHave a good evening.";
+
+  return slackResponse(summary);
 }
 
 async function handleAddTime(userId: string): Promise<NextResponse> {
@@ -133,6 +159,9 @@ async function handleConfirmEntry(userId: string): Promise<NextResponse> {
     description: pe.description,
     approved: true,
     scoroEntryId: null,
+    durationMinutes: pe.durationMinutes,
+    startDatetime: null,
+    endDatetime: null,
   };
 
   convo.drafts.push(draft);

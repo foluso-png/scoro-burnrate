@@ -32,7 +32,10 @@ export interface DraftEntry {
   confidence: "high" | "medium" | "low";
   description: string;
   approved: boolean;
-  scoroEntryId: number | null; // set after write
+  scoroEntryId: number | null;  // set after cron write
+  durationMinutes: number | null; // set for manual entries; calendar entries use event times
+  startDatetime: string | null;   // ISO datetime; null for manual entries
+  endDatetime: string | null;     // ISO datetime; null for manual entries
 }
 
 export interface PendingEntry {

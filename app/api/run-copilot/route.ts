@@ -446,20 +446,28 @@ export async function GET(request: NextRequest) {
       end: e.end,
       isInternal: e.isInternal,
     }));
-    const drafts: DraftEntry[] = matches.map((m) => ({
-      eventId: m.event_id,
-      eventTitle: events.find((e) => e.id === m.event_id)?.title || "",
-      projectId: m.project_id,
-      projectName: m.project_name,
-      taskId: m.task_id,
-      taskTitle: m.task_title,
-      confidence: m.confidence,
-      description: m.description,
-      approved: m.confidence !== "low" && m.project_id !== null && m.task_id !== null,
-      scoroEntryId:
-        written.find((w) => w.project_name === m.project_name && w.task_title === m.task_title)
-          ?.scoro_entry_id ?? null,
-    }));
+    const drafts: DraftEntry[] = matches.map((m) => {
+      const event = events.find((e) => e.id === m.event_id);
+      return {
+        eventId: m.event_id,
+        eventTitle: event?.title || "",
+        projectId: m.project_id,
+        projectName: m.project_name,
+        taskId: m.task_id,
+        taskTitle: m.task_title,
+        confidence: m.confidence,
+        description: m.description,
+        approved: m.confidence !== "low" && m.project_id !== null && m.task_id !== null,
+        scoroEntryId:
+          written.find((w) => w.project_name === m.project_name && w.task_title === m.task_title)
+            ?.scoro_entry_id ?? null,
+        durationMinutes: event
+          ? Math.round((new Date(event.end).getTime() - new Date(event.start).getTime()) / 60000)
+          : null,
+        startDatetime: event?.start ?? null,
+        endDatetime: event?.end ?? null,
+      };
+    });
 
     const convo = newConversation(slackId, eventSummaries);
     convo.step = "review_matches";
