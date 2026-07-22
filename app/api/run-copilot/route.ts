@@ -15,15 +15,25 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getAccessToken } from "@/lib/google-auth";
-import Anthropic from "@anthropic-ai/sdk";
+import {
+  newConversation,
+  saveConversation,
+  CalendarEventSummary,
+  DraftEntry,
+} from "@/lib/conversation";
+import {
+  matchEvents,
+  getProjectLookup,
+  scoroPost,
+  timeSlot,
+  MatchResult,
+} from "@/lib/matcher";
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 const USER_ID = 107; // Foluso's Scoro user ID
 const COPILOT_TAG = "[Co-pilot draft]";
-const PROJECT_LOOKUP_KEY = "project_lookup";
-const PROJECT_LOOKUP_TTL = 86400; // 24 hours
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,129 +55,8 @@ interface CalendarEvent {
   isInternal: boolean;
 }
 
-interface TaskRecord {
-  task_id: number;
-  title: string;
-  activity_id: number | null;
-  activity_name: string | null;
-  status: string;
-  assigned_user_ids: number[];
-}
-
-interface ProjectRecord {
-  project_id: number;
-  name: string;
-  client_name: string;
-  status: string;
-  status_id: number | string | null;
-  manager_id: number | null;
-  team_user_ids: number[];
-  start_date: string | null;
-  end_date: string | null;
-  tasks: TaskRecord[];
-}
-
-interface ScoroResponse<T = unknown> {
-  status: string;
-  statusCode: number;
-  data: T;
-  messages?: { error?: string[] };
-}
-
-interface ScoroProject {
-  project_id: number;
-  no?: string;
-  project_name?: string;
-  name?: string;
-  company_id?: number;
-  company_name?: string;
-  status?: string;
-  status_id?: number | string;
-  manager_id?: number;
-  project_users?: Array<{ id: string; email: string }>;
-  members?: number[];
-  team?: number[];
-  assigned_users?: number[];
-  date?: string;
-  start_date?: string;
-  end_date?: string;
-  deadline?: string;
-  is_deleted?: number;
-  [key: string]: unknown;
-}
-
-interface ScoroTask {
-  event_id: number;
-  event_name: string;
-  activity_id?: number;
-  activity_type?: string;
-  status: string;
-  is_completed: number;
-  assigned_to?: number;
-  related_users?: number[];
-  [key: string]: unknown;
-}
-
-interface MatchResult {
-  event_id: string;
-  project_id: number | null;
-  project_name: string | null;
-  client_name: string | null;
-  task_id: number | null;
-  task_title: string | null;
-  confidence: "high" | "medium" | "low";
-  description: string;
-  is_internal: boolean;
-  reasoning: string;
-}
-
 // ---------------------------------------------------------------------------
-// Scoro API helper
-// ---------------------------------------------------------------------------
-function scoroBaseUrl(): string {
-  return `https://${process.env.SCORO_SUBDOMAIN}.scoro.com/api/v2`;
-}
-
-async function scoroPost<T = unknown>(
-  endpoint: string,
-  payload: Record<string, unknown> = {}
-): Promise<ScoroResponse<T>> {
-  const url = `${scoroBaseUrl()}${endpoint}`;
-  const body = {
-    apiKey: process.env.SCORO_API_KEY,
-    company_account_id: process.env.SCORO_ACCOUNT_ID,
-    ...payload,
-  };
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  const json = (await res.json()) as ScoroResponse<T>;
-
-  if (!res.ok || json.status === "ERROR") {
-    const errMsg = json.messages?.error?.join("; ") || `HTTP ${res.status}`;
-    throw new Error(`Scoro ${endpoint}: [${res.status}] ${errMsg}`);
-  }
-
-  return json;
-}
-
-// ---------------------------------------------------------------------------
-// Upstash helpers
-// ---------------------------------------------------------------------------
-async function getRedis() {
-  const { Redis } = await import("@upstash/redis");
-  return new Redis({
-    url: process.env.KV_REST_API_URL!,
-    token: process.env.KV_REST_API_TOKEN!,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Step 1: Fetch today's calendar events
+// Fetch today's calendar events
 // ---------------------------------------------------------------------------
 function isInternalEmail(email: string): boolean {
   return (
@@ -230,207 +119,6 @@ async function fetchTodayEvents(
         isInternal,
       };
     });
-}
-
-// ---------------------------------------------------------------------------
-// Step 2: Project lookup (cached in Upstash)
-// ---------------------------------------------------------------------------
-interface ProjectLookup {
-  generated_at: string;
-  project_count: number;
-  projects: ProjectRecord[];
-}
-
-async function fetchAllProjects(): Promise<ScoroProject[]> {
-  const allProjects: ScoroProject[] = [];
-  let page = 1;
-  const perPage = 25;
-
-  while (true) {
-    const res = await scoroPost<ScoroProject[]>("/projects/list", {
-      per_page: perPage,
-      page,
-      detailed_response: true,
-    });
-    const projects = Array.isArray(res.data) ? res.data : [];
-    if (projects.length === 0) break;
-    allProjects.push(...projects);
-    if (projects.length < perPage) break;
-    page++;
-  }
-
-  return allProjects;
-}
-
-async function fetchProjectTasks(projectId: number): Promise<TaskRecord[]> {
-  const allTasks: ScoroTask[] = [];
-  let page = 1;
-
-  while (true) {
-    const res = await scoroPost<ScoroTask[]>("/tasks/list", {
-      filter: { project_id: projectId },
-      per_page: 100,
-      page,
-    });
-    const tasks = Array.isArray(res.data) ? res.data : [];
-    allTasks.push(...tasks);
-    if (tasks.length < 100) break;
-    page++;
-  }
-
-  const active = allTasks.filter((t) => t.is_completed === 0);
-
-  const seen = new Map<string, TaskRecord>();
-  for (const t of active) {
-    const name = t.event_name || "Untitled";
-    if (!seen.has(name)) {
-      seen.set(name, {
-        task_id: t.event_id,
-        title: name,
-        activity_id: t.activity_id || null,
-        activity_name: t.activity_type || null,
-        status: t.status,
-        assigned_user_ids:
-          t.related_users || (t.assigned_to ? [t.assigned_to] : []),
-      });
-    }
-  }
-
-  return [...seen.values()];
-}
-
-function extractTeam(p: ScoroProject): number[] {
-  if (Array.isArray(p.project_users) && p.project_users.length > 0) {
-    return p.project_users
-      .map((u) => parseInt(u.id, 10))
-      .filter((id) => !isNaN(id));
-  }
-  if (Array.isArray(p.members) && p.members.length > 0) return p.members;
-  if (Array.isArray(p.team) && p.team.length > 0) return p.team;
-  if (Array.isArray(p.assigned_users) && p.assigned_users.length > 0)
-    return p.assigned_users;
-  return [];
-}
-
-async function buildProjectLookup(): Promise<ProjectLookup> {
-  const allProjects = await fetchAllProjects();
-
-  const records: ProjectRecord[] = allProjects.map((p) => ({
-    project_id: p.project_id,
-    name: p.project_name || p.name || "",
-    client_name: p.company_name || "",
-    status: p.status || "unknown",
-    status_id: p.status_id ?? null,
-    manager_id: p.manager_id ?? null,
-    team_user_ids: extractTeam(p),
-    start_date: p.start_date || p.date || null,
-    end_date: p.end_date || p.deadline || null,
-    tasks: [],
-  }));
-
-  const activeRecords = records.filter((r) => r.status === "inprogress");
-
-  for (const r of activeRecords) {
-    r.tasks = await fetchProjectTasks(r.project_id);
-  }
-
-  return {
-    generated_at: new Date().toISOString(),
-    project_count: records.length,
-    projects: records,
-  };
-}
-
-async function getProjectLookup(): Promise<ProjectLookup> {
-  const redis = await getRedis();
-
-  const cached = await redis.get<string>(PROJECT_LOOKUP_KEY);
-  if (cached) {
-    const lookup: ProjectLookup =
-      typeof cached === "string" ? JSON.parse(cached) : cached;
-    const age =
-      (Date.now() - new Date(lookup.generated_at).getTime()) / 1000;
-    if (age < PROJECT_LOOKUP_TTL) {
-      return lookup;
-    }
-  }
-
-  const lookup = await buildProjectLookup();
-  await redis.set(PROJECT_LOOKUP_KEY, JSON.stringify(lookup), {
-    ex: PROJECT_LOOKUP_TTL,
-  });
-  return lookup;
-}
-
-// ---------------------------------------------------------------------------
-// Step 3: AI matching
-// ---------------------------------------------------------------------------
-function timeSlot(startISO: string, endISO: string): string {
-  const s = new Date(startISO);
-  const e = new Date(endISO);
-  const fmt = (d: Date) =>
-    `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  return `${fmt(s)}-${fmt(e)}`;
-}
-
-async function matchEvents(
-  events: CalendarEvent[],
-  projects: ProjectRecord[]
-): Promise<MatchResult[]> {
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-  const projectBlocks = projects.map((p) => {
-    const taskLines =
-      p.tasks.length > 0
-        ? p.tasks.map((t) => `    ${t.task_id} | ${t.title}`).join("\n")
-        : "    (no tasks)";
-    return `${p.project_id} | ${p.name} | ${p.client_name}\n${taskLines}`;
-  });
-
-  const systemPrompt = `You are a timesheet assistant for Campfire, a social-first marketing agency. Match calendar events to active projects AND a specific task within that project.
-
-ACTIVE PROJECTS (project_id | name | client) with their tasks (task_id | title):
-${projectBlocks.join("\n")}
-
-RULES:
-- Match each event to ONE project and ONE task within it, or null if no good match.
-- Pick the task whose title best fits the event context: "creative review" -> a Creative role/task; "shoot brief" -> a Production or Creator Marketing task; "retainer review" -> Account Manager task; vague meetings -> a general/admin task if available.
-- If no task is a strong fit, pick the first available task for that project.
-- "high" confidence: clear brand/client name match in event title or attendee domain.
-- "medium" confidence: likely match from partial name, context clues, or attendee domain.
-- "low" confidence: weak or ambiguous signal.
-- Internal meetings (standups, 1:1s, all-hands) with only @campfire.co.uk attendees should map to the internal time project and an appropriate task, flagged as is_internal: true.
-- If the event is too vague to match any project, return null for project_id and task_id with low confidence.
-- Description: concise summary for a Scoro time entry.
-
-Respond with ONLY a JSON array. Each element:
-{"event_id":"...","project_id":number|null,"project_name":"..."|null,"client_name":"..."|null,"task_id":number|null,"task_title":"..."|null,"confidence":"high"|"medium"|"low","description":"...","is_internal":boolean,"reasoning":"one sentence"}`;
-
-  const userMessage = JSON.stringify(
-    events.map((e) => ({
-      id: e.id,
-      title: e.title,
-      time: timeSlot(e.start, e.end),
-      attendees: e.attendees,
-    }))
-  );
-
-  const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 2000,
-    system: systemPrompt,
-    messages: [{ role: "user", content: userMessage }],
-  });
-
-  const text =
-    response.content[0].type === "text" ? response.content[0].text : "";
-
-  const jsonMatch = text.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    throw new Error("Claude did not return valid JSON");
-  }
-
-  return JSON.parse(jsonMatch[0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -521,13 +209,21 @@ async function writeDraftsToScoro(
 // ---------------------------------------------------------------------------
 // Step 5: Slack notification
 // ---------------------------------------------------------------------------
-async function sendSlackMessage(text: string): Promise<string> {
+interface SlackPostResult {
+  status: string;
+  channelId: string | null;
+  messageTs: string | null;
+}
+
+async function postSlackMessage(
+  body: Record<string, unknown>
+): Promise<SlackPostResult> {
   const slackToken = process.env.SLACK_BOT_TOKEN;
   const slackUser = process.env.SLACK_USER_ID;
 
   if (!slackToken || !slackUser) {
     console.log("Slack not configured, skipping notification");
-    return "skipped: no token";
+    return { status: "skipped: no token", channelId: null, messageTs: null };
   }
 
   try {
@@ -537,35 +233,69 @@ async function sendSlackMessage(text: string): Promise<string> {
         Authorization: `Bearer ${slackToken}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        channel: slackUser,
-        text,
-      }),
+      body: JSON.stringify({ channel: slackUser, ...body }),
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      return `failed: HTTP ${res.status} ${body}`;
+      const text = await res.text();
+      return {
+        status: `failed: HTTP ${res.status} ${text}`,
+        channelId: null,
+        messageTs: null,
+      };
     }
 
     const data = await res.json();
     if (!data.ok) {
-      return `failed: ${data.error || "unknown Slack API error"}`;
+      return {
+        status: `failed: ${data.error || "unknown Slack API error"}`,
+        channelId: null,
+        messageTs: null,
+      };
     }
 
-    return "sent";
+    return {
+      status: "sent",
+      channelId: data.channel || null,
+      messageTs: data.ts || null,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return `failed: ${msg}`;
+    return { status: `failed: ${msg}`, channelId: null, messageTs: null };
   }
 }
 
-function formatSlackSummary(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildActionButtons(): Record<string, unknown> {
+  return {
+    type: "actions",
+    elements: [
+      {
+        type: "button",
+        text: { type: "plain_text", text: "\u2705 Looks right", emoji: true },
+        action_id: "looks_right",
+        style: "primary",
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "\u2795 Add time", emoji: true },
+        action_id: "add_time",
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "\u270f\ufe0f Fix an entry", emoji: true },
+        action_id: "fix_entry",
+      },
+    ],
+  };
+}
+
+function formatSlackBlocks(
   events: CalendarEvent[],
   written: WriteResult[],
   skipped: MatchResult[],
   matches: MatchResult[]
-): string {
+): { text: string; blocks: Record<string, unknown>[] } {
   const today = new Date().toLocaleDateString("en-GB", {
     weekday: "long",
     day: "numeric",
@@ -576,7 +306,14 @@ function formatSlackSummary(
   const successfulWrites = written.filter((w) => !w.error);
 
   if (successfulWrites.length === 0) {
-    return `\ud83d\udcc5 Timesheet Co-pilot ran \u2014 ${today}\n\nNo billable events found today. Nothing written to Scoro.`;
+    const text = `\ud83d\udcc5 Timesheet Co-pilot ran \u2014 ${today}\n\nNo billable events found today. Nothing written to Scoro.`;
+    return {
+      text,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text } },
+        buildActionButtons(),
+      ],
+    };
   }
 
   const matchedLines = successfulWrites
@@ -584,15 +321,13 @@ function formatSlackSummary(
       const match = matches.find(
         (m) => m.project_name === w.project_name && m.task_title === w.task_title
       );
-      const event = events.find(
-        (e) => match && e.id === match.event_id
-      );
+      const event = events.find((e) => match && e.id === match.event_id);
       const time = event ? timeSlot(event.start, event.end) : "";
       return `\u2022 ${time} ${w.event_title} \u2192 ${w.project_name} (${w.confidence})`;
     })
     .join("\n");
 
-  let message = `\ud83d\udcc5 Timesheet draft ready \u2014 ${today}\n\nMatched ${successfulWrites.length} events:\n${matchedLines}`;
+  let body = `*Matched ${successfulWrites.length} events:*\n${matchedLines}`;
 
   if (skipped.length > 0) {
     const skippedNames = skipped
@@ -601,7 +336,7 @@ function formatSlackSummary(
         return event ? event.title : s.event_id;
       })
       .join(", ");
-    message += `\n\nSkipped: ${skippedNames}`;
+    body += `\n\n*Skipped:* ${skippedNames}`;
   }
 
   const failedEntries = written.filter((w) => w.error);
@@ -609,11 +344,29 @@ function formatSlackSummary(
     const failedLines = failedEntries
       .map((w) => `\u2022 ${w.event_title}: ${w.error}`)
       .join("\n");
-    message += `\n\nFailed to write:\n${failedLines}`;
+    body += `\n\n*Failed to write:*\n${failedLines}`;
   }
 
-  message += "\n\nWritten to Scoro as drafts. Review and submit by Friday.";
-  return message;
+  body += "\n\nWritten to Scoro as drafts. Review and submit by Friday.";
+
+  const text = `\ud83d\udcc5 Timesheet draft ready \u2014 ${today}\n\n${body}`;
+
+  return {
+    text,
+    blocks: [
+      {
+        type: "header",
+        text: {
+          type: "plain_text",
+          text: `\ud83d\udcc5 Timesheet draft ready \u2014 ${today}`,
+          emoji: true,
+        },
+      },
+      { type: "section", text: { type: "mrkdwn", text: body } },
+      { type: "divider" },
+      buildActionButtons(),
+    ],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -641,13 +394,26 @@ export async function GET(request: NextRequest) {
         month: "long",
         year: "numeric",
       });
-      const slackResult = await sendSlackMessage(
-        `\ud83d\udcc5 Timesheet Co-pilot ran \u2014 ${today}\n\nNo events found on the calendar today. Nothing written to Scoro.`
-      );
+      const text = `\ud83d\udcc5 Timesheet Co-pilot ran \u2014 ${today}\n\nNo events found on the calendar today. Nothing written to Scoro.`;
+      const slackPost = await postSlackMessage({
+        text,
+        blocks: [
+          { type: "section", text: { type: "mrkdwn", text } },
+          buildActionButtons(),
+        ],
+      });
+
+      // Create conversation state even with no events so user can "Add time"
+      const convo = newConversation(slackId, []);
+      convo.step = "review_matches";
+      convo.slackChannelId = slackPost.channelId;
+      convo.messageTs = slackPost.messageTs;
+      await saveConversation(convo);
+
       return NextResponse.json({
         message: "No events today",
         entries: [],
-        slack_result: slackResult,
+        slack_result: slackPost.status,
       });
     }
 
@@ -663,12 +429,54 @@ export async function GET(request: NextRequest) {
     // 5. Write approved drafts to Scoro
     const { written, skipped } = await writeDraftsToScoro(events, matches);
 
-    // 6. Send Slack notification
-    const slackResult = await sendSlackMessage(
-      formatSlackSummary(events, written, skipped, matches)
+    // 6. Send Slack notification with interactive buttons
+    const { text: summaryText, blocks } = formatSlackBlocks(
+      events,
+      written,
+      skipped,
+      matches
     );
+    const slackPost = await postSlackMessage({ text: summaryText, blocks });
 
-    // 7. Return summary
+    // 7. Create conversation state so user can interact via buttons
+    const eventSummaries: CalendarEventSummary[] = events.map((e) => ({
+      id: e.id,
+      title: e.title,
+      start: e.start,
+      end: e.end,
+      isInternal: e.isInternal,
+    }));
+    const drafts: DraftEntry[] = matches.map((m) => {
+      const event = events.find((e) => e.id === m.event_id);
+      return {
+        eventId: m.event_id,
+        eventTitle: event?.title || "",
+        projectId: m.project_id,
+        projectName: m.project_name,
+        taskId: m.task_id,
+        taskTitle: m.task_title,
+        confidence: m.confidence,
+        description: m.description,
+        approved: m.confidence !== "low" && m.project_id !== null && m.task_id !== null,
+        scoroEntryId:
+          written.find((w) => w.project_name === m.project_name && w.task_title === m.task_title)
+            ?.scoro_entry_id ?? null,
+        durationMinutes: event
+          ? Math.round((new Date(event.end).getTime() - new Date(event.start).getTime()) / 60000)
+          : null,
+        startDatetime: event?.start ?? null,
+        endDatetime: event?.end ?? null,
+      };
+    });
+
+    const convo = newConversation(slackId, eventSummaries);
+    convo.step = "review_matches";
+    convo.drafts = drafts;
+    convo.slackChannelId = slackPost.channelId;
+    convo.messageTs = slackPost.messageTs;
+    await saveConversation(convo);
+
+    // 8. Return summary
     const successCount = written.filter((w) => !w.error).length;
     const failCount = written.filter((w) => w.error).length;
 
@@ -677,7 +485,7 @@ export async function GET(request: NextRequest) {
       matched: successCount,
       failed: failCount,
       skipped: skipped.length,
-      slack_result: slackResult,
+      slack_result: slackPost.status,
       written,
       skippedEvents: skipped.map((s) => ({
         event_id: s.event_id,
