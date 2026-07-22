@@ -72,6 +72,56 @@ async function postSlackDm(channel: string, text: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Action buttons block (reusable across handlers)
+// ---------------------------------------------------------------------------
+function buildActionButtons(): Record<string, unknown> {
+  return {
+    type: "actions",
+    elements: [
+      {
+        type: "button",
+        text: { type: "plain_text", text: "\u2705 Looks right", emoji: true },
+        action_id: "looks_right",
+        style: "primary",
+      },
+      {
+        type: "button",
+        text: { type: "plain_text", text: "\u2795 Add time", emoji: true },
+        action_id: "add_time",
+      },
+      {
+        type: "button",
+        text: {
+          type: "plain_text",
+          text: "\u270f\ufe0f Fix an entry",
+          emoji: true,
+        },
+        action_id: "fix_entry",
+      },
+    ],
+  };
+}
+
+async function postResponseWithButtons(
+  responseUrl: string,
+  text: string
+): Promise<void> {
+  await fetch(responseUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      response_type: "ephemeral",
+      replace_original: false,
+      text,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text } },
+        buildActionButtons(),
+      ],
+    }),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Button handlers — post results via response_url or chat.postMessage
 // ---------------------------------------------------------------------------
 function formatDuration(mins: number): string {
@@ -197,7 +247,7 @@ async function handleConfirmEntry(
   responseUrl: string
 ): Promise<void> {
   const convo = await loadConversation(userId);
-  if (!convo || !convo.pendingEntry) {
+  if (!convo) {
     await postToResponseUrl(
       responseUrl,
       "Nothing to confirm. Try *Add time* first."
@@ -205,35 +255,52 @@ async function handleConfirmEntry(
     return;
   }
 
-  const pe = convo.pendingEntry;
+  const entries = convo.pendingEntries || [];
+  if (entries.length === 0) {
+    await postToResponseUrl(
+      responseUrl,
+      "Nothing to confirm. Try *Add time* first."
+    );
+    return;
+  }
 
-  const draft: DraftEntry = {
-    eventId: `manual-${Date.now()}`,
-    eventTitle: pe.text,
-    projectId: pe.projectId,
-    projectName: pe.projectName,
-    taskId: pe.taskId,
-    taskTitle: pe.taskTitle,
-    confidence: pe.confidence,
-    description: pe.description,
-    approved: true,
-    scoroEntryId: null,
-    durationMinutes: pe.durationMinutes,
-    startDatetime: null,
-    endDatetime: null,
-  };
+  for (const pe of entries) {
+    const draft: DraftEntry = {
+      eventId: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      eventTitle: pe.text,
+      projectId: pe.projectId,
+      projectName: pe.projectName,
+      taskId: pe.taskId,
+      taskTitle: pe.taskTitle,
+      confidence: pe.confidence,
+      description: pe.description,
+      approved: true,
+      scoroEntryId: null,
+      durationMinutes: pe.durationMinutes,
+      startDatetime: null,
+      endDatetime: null,
+    };
+    convo.drafts.push(draft);
+  }
 
-  convo.drafts.push(draft);
+  const count = entries.length;
+  const summary = entries
+    .map((pe) => {
+      const dur = formatDuration(pe.durationMinutes);
+      const project = pe.projectName || "unknown project";
+      return `\u2022 ${dur} on ${project}`;
+    })
+    .join("\n");
+
+  convo.pendingEntries = [];
   convo.pendingEntry = null;
   convo.step = "review_matches";
   await saveConversation(convo);
 
-  const dur = formatDuration(pe.durationMinutes);
-  const project = pe.projectName || "unknown project";
-
-  await postToResponseUrl(
+  const label = count === 1 ? "entry" : "entries";
+  await postResponseWithButtons(
     responseUrl,
-    `\u2705 Added: ${dur} on ${project}.\n\nAnything else? Type another entry, or tap *Looks right* on the original message when you're done.`
+    `\u2705 Added ${count} ${label}:\n${summary}`
   );
 }
 
@@ -242,12 +309,13 @@ async function handleRejectEntry(
   responseUrl: string
 ): Promise<void> {
   const convo = await loadConversation(userId);
-  if (!convo || !convo.pendingEntry) {
+  if (!convo) {
     await postToResponseUrl(responseUrl, "Nothing to reject.");
     return;
   }
 
   convo.pendingEntry = null;
+  convo.pendingEntries = [];
   convo.step = "editing";
   await saveConversation(convo);
 
@@ -309,9 +377,9 @@ async function handleConfirmFix(
   const project = draft.projectName || "unknown project";
   const updated = draft.scoroEntryId ? " Scoro entry updated." : "";
 
-  await postToResponseUrl(
+  await postResponseWithButtons(
     responseUrl,
-    `\u2705 Fixed: ${draft.eventTitle} \u2192 ${project} (${dur}).${updated}\n\nAnything else? Tap *Looks right* when you're done.`
+    `\u2705 Fixed: ${draft.eventTitle} \u2192 ${project} (${dur}).${updated}`
   );
 }
 

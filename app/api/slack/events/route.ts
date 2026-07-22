@@ -9,7 +9,11 @@ import {
   loadConversation,
   saveConversation,
 } from "@/lib/conversation";
-import { matchEvents, getProjectLookup } from "@/lib/matcher";
+import {
+  matchEvents,
+  getProjectLookup,
+  splitActivities,
+} from "@/lib/matcher";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -103,8 +107,11 @@ async function handleFreeTextEntry(
   const convo = await loadConversation(userId);
   if (!convo || convo.step !== "editing") return;
 
-  const durationMinutes = parseDurationMinutes(text);
-  if (!durationMinutes || durationMinutes <= 0) {
+  // Use AI to split the message into individual activities with durations
+  const activities = await splitActivities(text);
+  const withDuration = activities.filter((a) => a.durationMinutes > 0);
+
+  if (withDuration.length === 0) {
     await postSlackReply(
       channelId,
       [
@@ -112,7 +119,7 @@ async function handleFreeTextEntry(
           type: "section",
           text: {
             type: "mrkdwn",
-            text: "I couldn't find a duration in that message. Try something like:\n\u2022 _\"1 hour on Garnier deck\"_\n\u2022 _\"30 mins L'Or\u00e9al creative review\"_",
+            text: "I couldn't find a duration in that message. Try something like:\n\u2022 _\"1 hour on Garnier deck\"_\n\u2022 _\"30 mins L'Or\u00e9al creative review\"_\n\u2022 _\"30 mins admin and 1h on Wella deck\"_",
           },
         },
       ],
@@ -121,18 +128,32 @@ async function handleFreeTextEntry(
     return;
   }
 
+  // Match each activity to a project
   const lookup = await getProjectLookup();
   const activeProjects = lookup.projects.filter(
     (p) => p.status === "inprogress"
   );
+  const matches = await matchEvents(withDuration, activeProjects);
 
-  const matches = await matchEvents(
-    [{ id: "manual-1", title: text }],
-    activeProjects
-  );
+  // Build pending entries from matches
+  const pendingEntries = withDuration.map((activity) => {
+    const match = matches.find((m) => m.event_id === activity.id);
+    return {
+      text: activity.title,
+      durationMinutes: activity.durationMinutes,
+      projectId: match?.project_id ?? null,
+      projectName: match?.project_name ?? null,
+      clientName: match?.client_name ?? null,
+      taskId: match?.task_id ?? null,
+      taskTitle: match?.task_title ?? null,
+      confidence: (match?.confidence ?? "low") as "high" | "medium" | "low",
+      description: match?.description ?? activity.title,
+      isInternal: match?.is_internal ?? false,
+    };
+  });
 
-  const match = matches[0];
-  if (!match) {
+  const matched = pendingEntries.filter((e) => e.projectId !== null);
+  if (matched.length === 0) {
     await postSlackReply(
       channelId,
       [
@@ -149,36 +170,44 @@ async function handleFreeTextEntry(
     return;
   }
 
-  convo.pendingEntry = {
-    text,
-    durationMinutes,
-    projectId: match.project_id,
-    projectName: match.project_name,
-    clientName: match.client_name,
-    taskId: match.task_id,
-    taskTitle: match.task_title,
-    confidence: match.confidence,
-    description: match.description,
-    isInternal: match.is_internal,
-  };
+  convo.pendingEntries = matched;
   convo.step = "confirming";
   convo.slackChannelId = channelId;
   await saveConversation(convo);
 
-  const dur = formatDuration(durationMinutes);
-  const project = match.project_name || "unknown project";
-  const client = match.client_name ? ` (${match.client_name})` : "";
-  const billable = match.is_internal ? "non-billable" : "billable";
+  // Build confirmation message
+  let confirmText: string;
 
-  let confirmText = `Logging *${dur}* against *${project}*${client}, ${billable}.`;
-  if (match.task_title) {
-    confirmText += `\nTask: ${match.task_title}`;
+  if (matched.length === 1) {
+    const pe = matched[0];
+    const dur = formatDuration(pe.durationMinutes);
+    const project = pe.projectName || "unknown project";
+    const client = pe.clientName ? ` (${pe.clientName})` : "";
+    const billable = pe.isInternal ? "non-billable" : "billable";
+    confirmText = `Logging *${dur}* against *${project}*${client}, ${billable}.`;
+    if (pe.taskTitle) confirmText += `\nTask: ${pe.taskTitle}`;
+    if (pe.confidence === "low") {
+      confirmText +=
+        "\n\n\u26a0\ufe0f Low confidence match. Please check the project is correct.";
+    }
+    confirmText += "\n\nCorrect?";
+  } else {
+    confirmText = `Found *${matched.length} entries*:\n\n`;
+    for (const pe of matched) {
+      const dur = formatDuration(pe.durationMinutes);
+      const project = pe.projectName || "unknown project";
+      const billable = pe.isInternal ? "non-billable" : "billable";
+      confirmText += `\u2022 *${dur}* \u2192 *${project}*, ${billable}`;
+      if (pe.taskTitle) confirmText += ` (${pe.taskTitle})`;
+      if (pe.confidence === "low") confirmText += " \u26a0\ufe0f";
+      confirmText += "\n";
+    }
+    if (matched.some((pe) => pe.confidence === "low")) {
+      confirmText +=
+        "\n\u26a0\ufe0f Low confidence on some matches. Please check.";
+    }
+    confirmText += "\nConfirm all?";
   }
-  if (match.confidence === "low") {
-    confirmText +=
-      "\n\n\u26a0\ufe0f Low confidence match. Please check the project is correct.";
-  }
-  confirmText += "\n\nCorrect?";
 
   await postSlackReply(
     channelId,
@@ -205,7 +234,9 @@ async function handleFreeTextEntry(
         ],
       },
     ],
-    `Confirm: ${dur} on ${project}?`
+    matched.length === 1
+      ? `Confirm: ${formatDuration(matched[0].durationMinutes)} on ${matched[0].projectName}?`
+      : `Confirm ${matched.length} entries?`
   );
 }
 

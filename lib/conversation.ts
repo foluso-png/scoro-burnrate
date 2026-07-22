@@ -57,7 +57,8 @@ export interface ConversationState {
   step: ConversationStep;
   events: CalendarEventSummary[];
   drafts: DraftEntry[];
-  pendingEntry: PendingEntry | null;    // set during confirming step
+  pendingEntry: PendingEntry | null;    // set during fix confirming step
+  pendingEntries: PendingEntry[];       // set during add confirming step (supports multi-entry)
   fixingDraftIndex: number | null;      // index into drafts[] being fixed
   slackChannelId: string | null;        // DM channel for follow-up messages
   messageTs: string | null;             // timestamp of the last bot message (for updates)
@@ -105,6 +106,7 @@ export function newConversation(
     events,
     drafts: [],
     pendingEntry: null,
+    pendingEntries: [],
     fixingDraftIndex: null,
     slackChannelId: null,
     messageTs: null,
