@@ -264,33 +264,71 @@ export function timeSlot(startISO: string, endISO: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// AI activity splitting — extract individual time entries from free text
+// AI split + match — single call for free-text time entry input
 // ---------------------------------------------------------------------------
-export interface SplitActivity {
+// Model used for free-text split+match (structured extraction task).
+// Change this constant to switch models if accuracy needs tuning.
+const FREE_TEXT_MODEL = "claude-haiku-4-5-20251001";
+
+export interface FreeTextEntry {
   id: string;
   title: string;
   durationMinutes: number;
+  project_id: number | null;
+  project_name: string | null;
+  client_name: string | null;
+  task_id: number | null;
+  task_title: string | null;
+  confidence: "high" | "medium" | "low";
+  description: string;
+  is_internal: boolean;
 }
 
-export async function splitActivities(text: string): Promise<SplitActivity[]> {
+export async function splitAndMatchFreeText(
+  text: string,
+  projects: ProjectRecord[]
+): Promise<FreeTextEntry[]> {
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-  const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 1000,
-    system: `You extract time entries from a free-text message. Split the message into individual activities, each with its duration in minutes.
+  const projectBlocks = projects.map((p) => {
+    const taskLines =
+      p.tasks.length > 0
+        ? p.tasks.map((t) => `    ${t.task_id} | ${t.title}`).join("\n")
+        : "    (no tasks)";
+    return `${p.project_id} | ${p.name} | ${p.client_name}\n${taskLines}`;
+  });
+
+  const systemPrompt = `You are a timesheet assistant for Campfire, a social-first marketing agency. You receive a free-text message describing work done today. Your job is to:
+1. Split it into individual activities (if the message describes more than one).
+2. Extract the duration for each activity.
+3. Match each activity to an active project and task.
+
+ACTIVE PROJECTS (project_id | name | client) with their tasks (task_id | title):
+${projectBlocks.join("\n")}
 
 RULES:
-- Each activity must be a distinct piece of work with its own duration.
-- Parse durations: "30 mins", "1 hour", "1.5h", "2h30m", "an hour", "half an hour", "90 minutes", etc.
-- If the message describes multiple activities (connected by "and", "then", "plus", commas, semicolons, etc.), split them into separate items.
-- If the message describes only one activity, return a single item.
-- Preserve client names, project names, and activity descriptions in "title" so they can be matched to projects.
+- Parse durations from the text: "30 mins", "1 hour", "1.5h", "2h30m", "an hour", "half an hour", etc.
 - Do NOT invent durations. If no duration is mentioned for an activity, set durationMinutes to 0.
-- "title" should be a natural description suitable for project matching, not just the time component.
+- If the message describes multiple activities (connected by "and", "then", "plus", commas, etc.), split them into separate entries.
+- If the message describes only one activity, return a single entry.
+- Match each activity to ONE project and ONE task, or null if no good match.
+- Pick the task whose title best fits the activity context.
+- If no task is a strong fit, pick the first available task for that project.
+- "high" confidence: clear brand/client name match.
+- "medium" confidence: likely match from partial name or context clues.
+- "low" confidence: weak or ambiguous signal.
+- Internal work (admin, standups, 1:1s, internal meetings) should map to the internal time project, flagged as is_internal: true.
+- If too vague to match, return null for project_id and task_id with low confidence.
+- "description": concise summary for a Scoro time entry.
+- "title": preserve the original activity description for display.
 
 Respond with ONLY a JSON array:
-[{"id":"1","title":"description for matching","durationMinutes":number}]`,
+[{"id":"1","title":"...","durationMinutes":number,"project_id":number|null,"project_name":"..."|null,"client_name":"..."|null,"task_id":number|null,"task_title":"..."|null,"confidence":"high"|"medium"|"low","description":"...","is_internal":boolean}]`;
+
+  const response = await anthropic.messages.create({
+    model: FREE_TEXT_MODEL,
+    max_tokens: 2000,
+    system: systemPrompt,
     messages: [{ role: "user", content: text }],
   });
 
@@ -299,13 +337,16 @@ Respond with ONLY a JSON array:
   const jsonMatch = responseText.match(/\[[\s\S]*\]/);
   if (!jsonMatch) return [];
 
-  const activities: SplitActivity[] = JSON.parse(jsonMatch[0]);
-  return activities.map((a, i) => ({
-    ...a,
+  const entries: FreeTextEntry[] = JSON.parse(jsonMatch[0]);
+  return entries.map((e, i) => ({
+    ...e,
     id: `manual-${i + 1}`,
   }));
 }
 
+// ---------------------------------------------------------------------------
+// AI matching — shared by run-copilot, fix flow, and calendar events
+// ---------------------------------------------------------------------------
 export async function matchEvents(
   events: MatchInput[],
   projects: ProjectRecord[]
