@@ -9,7 +9,11 @@ import {
   loadConversation,
   saveConversation,
 } from "@/lib/conversation";
-import { matchEvents, getProjectLookup } from "@/lib/matcher";
+import {
+  matchEvents,
+  getProjectLookup,
+  splitActivities,
+} from "@/lib/matcher";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -103,8 +107,11 @@ async function handleFreeTextEntry(
   const convo = await loadConversation(userId);
   if (!convo || convo.step !== "editing") return;
 
-  const durationMinutes = parseDurationMinutes(text);
-  if (!durationMinutes || durationMinutes <= 0) {
+  // Use AI to split the message into individual activities with durations
+  const activities = await splitActivities(text);
+  const withDuration = activities.filter((a) => a.durationMinutes > 0);
+
+  if (withDuration.length === 0) {
     await postSlackReply(
       channelId,
       [
@@ -112,7 +119,7 @@ async function handleFreeTextEntry(
           type: "section",
           text: {
             type: "mrkdwn",
-            text: "I couldn't find a duration in that message. Try something like:\n\u2022 _\"1 hour on Garnier deck\"_\n\u2022 _\"30 mins L'Or\u00e9al creative review\"_",
+            text: "I couldn't find a duration in that message. Try something like:\n\u2022 _\"1 hour on Garnier deck\"_\n\u2022 _\"30 mins L'Or\u00e9al creative review\"_\n\u2022 _\"30 mins admin and 1h on Wella deck\"_",
           },
         },
       ],
@@ -121,18 +128,32 @@ async function handleFreeTextEntry(
     return;
   }
 
+  // Match each activity to a project
   const lookup = await getProjectLookup();
   const activeProjects = lookup.projects.filter(
     (p) => p.status === "inprogress"
   );
+  const matches = await matchEvents(withDuration, activeProjects);
 
-  const matches = await matchEvents(
-    [{ id: "manual-1", title: text }],
-    activeProjects
-  );
+  // Build pending entries from matches
+  const pendingEntries = withDuration.map((activity) => {
+    const match = matches.find((m) => m.event_id === activity.id);
+    return {
+      text: activity.title,
+      durationMinutes: activity.durationMinutes,
+      projectId: match?.project_id ?? null,
+      projectName: match?.project_name ?? null,
+      clientName: match?.client_name ?? null,
+      taskId: match?.task_id ?? null,
+      taskTitle: match?.task_title ?? null,
+      confidence: (match?.confidence ?? "low") as "high" | "medium" | "low",
+      description: match?.description ?? activity.title,
+      isInternal: match?.is_internal ?? false,
+    };
+  });
 
-  const match = matches[0];
-  if (!match) {
+  const matched = pendingEntries.filter((e) => e.projectId !== null);
+  if (matched.length === 0) {
     await postSlackReply(
       channelId,
       [
@@ -149,36 +170,44 @@ async function handleFreeTextEntry(
     return;
   }
 
-  convo.pendingEntry = {
-    text,
-    durationMinutes,
-    projectId: match.project_id,
-    projectName: match.project_name,
-    clientName: match.client_name,
-    taskId: match.task_id,
-    taskTitle: match.task_title,
-    confidence: match.confidence,
-    description: match.description,
-    isInternal: match.is_internal,
-  };
+  convo.pendingEntries = matched;
   convo.step = "confirming";
   convo.slackChannelId = channelId;
   await saveConversation(convo);
 
-  const dur = formatDuration(durationMinutes);
-  const project = match.project_name || "unknown project";
-  const client = match.client_name ? ` (${match.client_name})` : "";
-  const billable = match.is_internal ? "non-billable" : "billable";
+  // Build confirmation message
+  let confirmText: string;
 
-  let confirmText = `Logging *${dur}* against *${project}*${client}, ${billable}.`;
-  if (match.task_title) {
-    confirmText += `\nTask: ${match.task_title}`;
+  if (matched.length === 1) {
+    const pe = matched[0];
+    const dur = formatDuration(pe.durationMinutes);
+    const project = pe.projectName || "unknown project";
+    const client = pe.clientName ? ` (${pe.clientName})` : "";
+    const billable = pe.isInternal ? "non-billable" : "billable";
+    confirmText = `Logging *${dur}* against *${project}*${client}, ${billable}.`;
+    if (pe.taskTitle) confirmText += `\nTask: ${pe.taskTitle}`;
+    if (pe.confidence === "low") {
+      confirmText +=
+        "\n\n\u26a0\ufe0f Low confidence match. Please check the project is correct.";
+    }
+    confirmText += "\n\nCorrect?";
+  } else {
+    confirmText = `Found *${matched.length} entries*:\n\n`;
+    for (const pe of matched) {
+      const dur = formatDuration(pe.durationMinutes);
+      const project = pe.projectName || "unknown project";
+      const billable = pe.isInternal ? "non-billable" : "billable";
+      confirmText += `\u2022 *${dur}* \u2192 *${project}*, ${billable}`;
+      if (pe.taskTitle) confirmText += ` (${pe.taskTitle})`;
+      if (pe.confidence === "low") confirmText += " \u26a0\ufe0f";
+      confirmText += "\n";
+    }
+    if (matched.some((pe) => pe.confidence === "low")) {
+      confirmText +=
+        "\n\u26a0\ufe0f Low confidence on some matches. Please check.";
+    }
+    confirmText += "\nConfirm all?";
   }
-  if (match.confidence === "low") {
-    confirmText +=
-      "\n\n\u26a0\ufe0f Low confidence match. Please check the project is correct.";
-  }
-  confirmText += "\n\nCorrect?";
 
   await postSlackReply(
     channelId,
@@ -205,7 +234,211 @@ async function handleFreeTextEntry(
         ],
       },
     ],
-    `Confirm: ${dur} on ${project}?`
+    matched.length === 1
+      ? `Confirm: ${formatDuration(matched[0].durationMinutes)} on ${matched[0].projectName}?`
+      : `Confirm ${matched.length} entries?`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Handle free-text message when user is in "fixing" step
+// ---------------------------------------------------------------------------
+async function handleFixText(
+  userId: string,
+  channelId: string,
+  text: string
+): Promise<void> {
+  const convo = await loadConversation(userId);
+  if (!convo || convo.step !== "fixing") return;
+
+  const approvedDrafts = convo.drafts.filter((d) => d.approved);
+
+  // If we haven't identified which entry to fix yet, parse the user's reply
+  if (convo.fixingDraftIndex === null) {
+    // Try to match by number first
+    const numMatch = text.match(/(\d+)/);
+    let draftIdx: number | null = null;
+
+    if (numMatch) {
+      const num = parseInt(numMatch[1], 10);
+      if (num >= 1 && num <= approvedDrafts.length) {
+        // Map from approved-list index to drafts[] index
+        draftIdx = convo.drafts.indexOf(approvedDrafts[num - 1]);
+      }
+    }
+
+    // If no number match, try to match by event title substring
+    if (draftIdx === null) {
+      const lower = text.toLowerCase();
+      const matched = approvedDrafts.find((d) =>
+        d.eventTitle.toLowerCase().includes(lower) ||
+        lower.includes(d.eventTitle.toLowerCase().split(" ")[0])
+      );
+      if (matched) {
+        draftIdx = convo.drafts.indexOf(matched);
+      }
+    }
+
+    if (draftIdx === null) {
+      await postSlackReply(
+        channelId,
+        [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: "I couldn't work out which entry you mean. Reply with the number (e.g. _\"2\"_) or include part of the event name.",
+            },
+          },
+        ],
+        "Couldn't identify entry"
+      );
+      return;
+    }
+
+    convo.fixingDraftIndex = draftIdx;
+
+    // Check if the message also contains a correction
+    // Strip the number prefix if present to see if there's more context
+    const correction = text.replace(/^\s*\d+\.?\s*/, "").trim();
+
+    if (!correction) {
+      await saveConversation(convo);
+      const draft = convo.drafts[draftIdx];
+      await postSlackReply(
+        channelId,
+        [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: `Fixing *${draft.eventTitle}* (currently \u2192 ${draft.projectName || "unmatched"}).\n\nWhat's wrong? For example:\n\u2022 _\"should be Garnier social\"_\n\u2022 _\"was actually 45 mins\"_\n\u2022 _\"internal time, not client work\"_`,
+            },
+          },
+        ],
+        `Fixing: ${draft.eventTitle}`
+      );
+      return;
+    }
+
+    // Fall through to process the correction text
+    await saveConversation(convo);
+    await processFixCorrection(convo, channelId, correction);
+    return;
+  }
+
+  // We already know which entry — this message is the correction
+  await processFixCorrection(convo, channelId, text);
+}
+
+async function processFixCorrection(
+  convo: Awaited<ReturnType<typeof loadConversation>> & object,
+  channelId: string,
+  text: string
+): Promise<void> {
+  const idx = convo.fixingDraftIndex!;
+  const draft = convo.drafts[idx];
+
+  // Check for duration change
+  const durationMinutes = parseDurationMinutes(text);
+
+  // Re-match via AI to find the correct project
+  const lookup = await getProjectLookup();
+  const activeProjects = lookup.projects.filter(
+    (p) => p.status === "inprogress"
+  );
+
+  const matches = await matchEvents(
+    [{ id: "fix-1", title: text }],
+    activeProjects
+  );
+
+  const match = matches[0];
+
+  // If no match and no duration change, we can't do anything useful
+  if (!match && !durationMinutes) {
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "I couldn't match that to a project. Try being more specific with a client or project name.",
+          },
+        },
+      ],
+      "No match found"
+    );
+    return;
+  }
+
+  // Build the pending fix
+  convo.pendingEntry = {
+    text,
+    durationMinutes: durationMinutes || draft.durationMinutes || 0,
+    projectId: match?.project_id ?? draft.projectId,
+    projectName: match?.project_name ?? draft.projectName,
+    clientName: match?.client_name ?? null,
+    taskId: match?.task_id ?? draft.taskId,
+    taskTitle: match?.task_title ?? draft.taskTitle,
+    confidence: match?.confidence ?? draft.confidence,
+    description: match?.description ?? draft.description,
+    isInternal: match?.is_internal ?? false,
+  };
+  convo.step = "fixing";
+  convo.slackChannelId = channelId;
+  await saveConversation(convo);
+
+  // Build confirmation message
+  const dur = formatDuration(convo.pendingEntry.durationMinutes);
+  const project = convo.pendingEntry.projectName || "unknown project";
+  const client = convo.pendingEntry.clientName
+    ? ` (${convo.pendingEntry.clientName})`
+    : "";
+  const billable = convo.pendingEntry.isInternal
+    ? "non-billable"
+    : "billable";
+
+  let confirmText = `Change *${draft.eventTitle}* to:\n\u2022 Project: *${project}*${client}, ${billable}`;
+  if (convo.pendingEntry.taskTitle) {
+    confirmText += `\n\u2022 Task: ${convo.pendingEntry.taskTitle}`;
+  }
+  if (durationMinutes) {
+    confirmText += `\n\u2022 Duration: ${dur}`;
+  }
+  if (match?.confidence === "low") {
+    confirmText +=
+      "\n\n\u26a0\ufe0f Low confidence match. Please check the project is correct.";
+  }
+  confirmText += "\n\nCorrect?";
+
+  await postSlackReply(
+    channelId,
+    [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: confirmText },
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "\u2705 Yes", emoji: true },
+            action_id: "confirm_fix",
+            style: "primary",
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "\u274c No", emoji: true },
+            action_id: "reject_fix",
+            style: "danger",
+          },
+        ],
+      },
+    ],
+    `Fix: ${draft.eventTitle} \u2192 ${project}?`
   );
 }
 
@@ -266,6 +499,8 @@ export async function POST(request: NextRequest) {
       const convo = await loadConversation(userId);
       if (convo && convo.step === "editing") {
         await handleFreeTextEntry(userId, channelId, text);
+      } else if (convo && convo.step === "fixing") {
+        await handleFixText(userId, channelId, text);
       }
     } catch (err) {
       console.error(

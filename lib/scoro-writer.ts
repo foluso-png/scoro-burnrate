@@ -213,6 +213,27 @@ async function writeOrUpdateEntry(
 }
 
 // ---------------------------------------------------------------------------
+// Update an existing Scoro entry in place (used by the "Fix" flow)
+// ---------------------------------------------------------------------------
+export async function updateExistingEntry(
+  entryId: number,
+  updates: {
+    taskId?: number;
+    projectId?: number;
+    durationMinutes?: number;
+    description?: string;
+  }
+): Promise<void> {
+  const payload: Record<string, unknown> = {};
+
+  if (updates.taskId !== undefined) payload.event_id = updates.taskId;
+  if (updates.description !== undefined) payload.description = `${COPILOT_TAG} ${updates.description}`;
+  if (updates.durationMinutes !== undefined) payload.duration = durationToStr(updates.durationMinutes);
+
+  await scoroPost(`/timeEntries/modify/${entryId}`, { request: payload });
+}
+
+// ---------------------------------------------------------------------------
 // Finalise conversation — write all approved drafts to Scoro
 // ---------------------------------------------------------------------------
 export async function finaliseAndWrite(

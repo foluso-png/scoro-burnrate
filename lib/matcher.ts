@@ -263,6 +263,49 @@ export function timeSlot(startISO: string, endISO: string): string {
   return `${fmt(s)}-${fmt(e)}`;
 }
 
+// ---------------------------------------------------------------------------
+// AI activity splitting — extract individual time entries from free text
+// ---------------------------------------------------------------------------
+export interface SplitActivity {
+  id: string;
+  title: string;
+  durationMinutes: number;
+}
+
+export async function splitActivities(text: string): Promise<SplitActivity[]> {
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  const response = await anthropic.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 1000,
+    system: `You extract time entries from a free-text message. Split the message into individual activities, each with its duration in minutes.
+
+RULES:
+- Each activity must be a distinct piece of work with its own duration.
+- Parse durations: "30 mins", "1 hour", "1.5h", "2h30m", "an hour", "half an hour", "90 minutes", etc.
+- If the message describes multiple activities (connected by "and", "then", "plus", commas, semicolons, etc.), split them into separate items.
+- If the message describes only one activity, return a single item.
+- Preserve client names, project names, and activity descriptions in "title" so they can be matched to projects.
+- Do NOT invent durations. If no duration is mentioned for an activity, set durationMinutes to 0.
+- "title" should be a natural description suitable for project matching, not just the time component.
+
+Respond with ONLY a JSON array:
+[{"id":"1","title":"description for matching","durationMinutes":number}]`,
+    messages: [{ role: "user", content: text }],
+  });
+
+  const responseText =
+    response.content[0].type === "text" ? response.content[0].text : "";
+  const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) return [];
+
+  const activities: SplitActivity[] = JSON.parse(jsonMatch[0]);
+  return activities.map((a, i) => ({
+    ...a,
+    id: `manual-${i + 1}`,
+  }));
+}
+
 export async function matchEvents(
   events: MatchInput[],
   projects: ProjectRecord[]
