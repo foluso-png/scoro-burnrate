@@ -12,6 +12,7 @@ export type ConversationStep =
   | "review_matches"     // user reviewing AI match proposals
   | "editing"            // user editing/correcting a match
   | "confirming"         // user confirming before write to Scoro
+  | "fixing"             // user fixing an existing matched entry
   | "complete";          // entries written, conversation finished
 
 export interface CalendarEventSummary {
@@ -56,10 +57,11 @@ export interface ConversationState {
   step: ConversationStep;
   events: CalendarEventSummary[];
   drafts: DraftEntry[];
-  pendingEntry: PendingEntry | null; // set during confirming step
-  slackChannelId: string | null;     // DM channel for follow-up messages
-  messageTs: string | null;          // timestamp of the last bot message (for updates)
-  createdAt: string;                 // ISO timestamp
+  pendingEntry: PendingEntry | null;    // set during confirming step
+  fixingDraftIndex: number | null;      // index into drafts[] being fixed
+  slackChannelId: string | null;        // DM channel for follow-up messages
+  messageTs: string | null;             // timestamp of the last bot message (for updates)
+  createdAt: string;                    // ISO timestamp
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +105,7 @@ export function newConversation(
     events,
     drafts: [],
     pendingEntry: null,
+    fixingDraftIndex: null,
     slackChannelId: null,
     messageTs: null,
     createdAt: new Date().toISOString(),

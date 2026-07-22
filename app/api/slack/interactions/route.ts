@@ -10,7 +10,7 @@ import {
   clearConversation,
   DraftEntry,
 } from "@/lib/conversation";
-import { finaliseAndWrite } from "@/lib/scoro-writer";
+import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -166,15 +166,8 @@ async function handleFixEntry(
     return;
   }
 
-  const draftList = convo.drafts
-    .filter((d) => d.approved)
-    .map(
-      (d, i) =>
-        `${i + 1}. ${d.eventTitle} \u2192 ${d.projectName || "unmatched"}`
-    )
-    .join("\n");
-
-  if (!draftList) {
+  const approvedDrafts = convo.drafts.filter((d) => d.approved);
+  if (approvedDrafts.length === 0) {
     await postToResponseUrl(
       responseUrl,
       "No entries to fix. Try *Add time* instead."
@@ -182,11 +175,20 @@ async function handleFixEntry(
     return;
   }
 
+  const draftList = approvedDrafts
+    .map(
+      (d, i) =>
+        `${i + 1}. ${d.eventTitle} \u2192 ${d.projectName || "unmatched"} (${formatDuration(d.durationMinutes || 0)})`
+    )
+    .join("\n");
+
+  convo.step = "fixing";
+  convo.fixingDraftIndex = null;
   await saveConversation(convo);
 
   await postToResponseUrl(
     responseUrl,
-    `Which entry needs fixing?\n\n${draftList}\n\nReply with the number or describe what's wrong. (Fix flow coming soon.)`
+    `Which entry needs fixing?\n\n${draftList}\n\nReply with the number or describe what's wrong.`
   );
 }
 
@@ -255,6 +257,84 @@ async function handleRejectEntry(
   );
 }
 
+async function handleConfirmFix(
+  userId: string,
+  responseUrl: string
+): Promise<void> {
+  const convo = await loadConversation(userId);
+  if (!convo || !convo.pendingEntry || convo.fixingDraftIndex === null) {
+    await postToResponseUrl(responseUrl, "Nothing to confirm.");
+    return;
+  }
+
+  const idx = convo.fixingDraftIndex;
+  const draft = convo.drafts[idx];
+  const pe = convo.pendingEntry;
+
+  // Update the draft in conversation state
+  draft.projectId = pe.projectId;
+  draft.projectName = pe.projectName;
+  draft.taskId = pe.taskId;
+  draft.taskTitle = pe.taskTitle;
+  draft.confidence = pe.confidence;
+  draft.description = pe.description;
+  if (pe.durationMinutes) {
+    draft.durationMinutes = pe.durationMinutes;
+  }
+
+  // If there's an existing Scoro entry, update it in place
+  if (draft.scoroEntryId && draft.taskId !== null) {
+    try {
+      await updateExistingEntry(draft.scoroEntryId, {
+        taskId: draft.taskId,
+        durationMinutes: draft.durationMinutes || undefined,
+        description: draft.description,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await postToResponseUrl(
+        responseUrl,
+        `Failed to update Scoro entry: ${msg}`
+      );
+      return;
+    }
+  }
+
+  convo.pendingEntry = null;
+  convo.fixingDraftIndex = null;
+  convo.step = "review_matches";
+  await saveConversation(convo);
+
+  const dur = formatDuration(draft.durationMinutes || 0);
+  const project = draft.projectName || "unknown project";
+  const updated = draft.scoroEntryId ? " Scoro entry updated." : "";
+
+  await postToResponseUrl(
+    responseUrl,
+    `\u2705 Fixed: ${draft.eventTitle} \u2192 ${project} (${dur}).${updated}\n\nAnything else? Tap *Looks right* when you're done.`
+  );
+}
+
+async function handleRejectFix(
+  userId: string,
+  responseUrl: string
+): Promise<void> {
+  const convo = await loadConversation(userId);
+  if (!convo) {
+    await postToResponseUrl(responseUrl, "Nothing to reject.");
+    return;
+  }
+
+  convo.pendingEntry = null;
+  convo.step = "fixing";
+  await saveConversation(convo);
+
+  await postToResponseUrl(
+    responseUrl,
+    "No worries. Describe the correct project or client more specifically, like:\n\u2022 _\"it was Wella TikTok\"_\n\u2022 _\"should be internal time\"_"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // POST handler — acknowledge immediately, defer work with after()
 // ---------------------------------------------------------------------------
@@ -318,6 +398,12 @@ export async function POST(request: NextRequest) {
           break;
         case "reject_entry":
           await handleRejectEntry(userId, responseUrl);
+          break;
+        case "confirm_fix":
+          await handleConfirmFix(userId, responseUrl);
+          break;
+        case "reject_fix":
+          await handleRejectFix(userId, responseUrl);
           break;
         default:
           console.warn(`Unknown action_id: ${actionId}`);
