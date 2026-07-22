@@ -14,6 +14,7 @@ import {
   getProjectLookup,
   splitAndMatchFreeText,
 } from "@/lib/matcher";
+import { runCopilotSummary } from "@/lib/copilot-summary";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -463,6 +464,44 @@ async function processFixCorrection(
 }
 
 // ---------------------------------------------------------------------------
+// Detect "end my day" trigger phrases
+// ---------------------------------------------------------------------------
+function isEndOfDayTrigger(text: string): boolean {
+  const lower = text.toLowerCase().trim();
+  return /\b(end\s+(my|the|of)\s+day|wrap\s*up|eod|done\s+for\s+(the\s+day|today)|finish(ed)?\s+for\s+(the\s+day|today)|(my|the|run)\s+summary|give\s+me\s+my\s+summary|show\s+(my\s+)?summary|timesheet)\b/i.test(
+    lower
+  );
+}
+
+async function handleEndOfDay(
+  userId: string,
+  channelId: string
+): Promise<void> {
+  try {
+    await runCopilotSummary(userId, {
+      channelId,
+      writeToScoro: false,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("On-demand summary error:", msg);
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `Something went wrong running your summary: ${msg}`,
+          },
+        },
+      ],
+      "Summary error"
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // POST handler — acknowledge immediately, defer work with after()
 // ---------------------------------------------------------------------------
 export async function POST(request: NextRequest) {
@@ -516,6 +555,12 @@ export async function POST(request: NextRequest) {
   // Acknowledge immediately, process in background
   after(async () => {
     try {
+      // Check for "end my day" trigger before conversation state
+      if (isEndOfDayTrigger(text)) {
+        await handleEndOfDay(userId, channelId);
+        return;
+      }
+
       const convo = await loadConversation(userId);
       if (convo && convo.step === "editing") {
         await handleFreeTextEntry(userId, channelId, text);
