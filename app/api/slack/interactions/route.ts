@@ -1,7 +1,8 @@
 // Required env vars:
 //   SLACK_SIGNING_SECRET - Slack app signing secret for request verification
+//   SLACK_BOT_TOKEN      - for posting follow-up messages
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import crypto from "crypto";
 import {
   loadConversation,
@@ -20,7 +21,6 @@ function verifySlackSignature(
   rawBody: string,
   signature: string
 ): boolean {
-  // Reject requests older than 5 minutes to prevent replay attacks
   const now = Math.floor(Date.now() / 1000);
   if (Math.abs(now - parseInt(timestamp, 10)) > 300) {
     return false;
@@ -40,36 +40,74 @@ function verifySlackSignature(
 }
 
 // ---------------------------------------------------------------------------
-// Slack response helpers
+// Post results back to Slack after acknowledgement
 // ---------------------------------------------------------------------------
-function slackResponse(text: string): NextResponse {
-  return NextResponse.json({
-    response_type: "ephemeral",
-    replace_original: false,
-    text,
+async function postToResponseUrl(
+  responseUrl: string,
+  text: string
+): Promise<void> {
+  await fetch(responseUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      response_type: "ephemeral",
+      replace_original: false,
+      text,
+    }),
+  });
+}
+
+async function postSlackDm(channel: string, text: string): Promise<void> {
+  const token = process.env.SLACK_BOT_TOKEN;
+  if (!token) return;
+
+  await fetch("https://slack.com/api/chat.postMessage", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ channel, text }),
   });
 }
 
 // ---------------------------------------------------------------------------
-// Button handlers
+// Button handlers — post results via response_url or chat.postMessage
 // ---------------------------------------------------------------------------
-async function handleLooksRight(userId: string): Promise<NextResponse> {
+function formatDuration(mins: number): string {
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+async function handleLooksRight(
+  userId: string,
+  responseUrl: string
+): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    return slackResponse("No active timesheet session found. Run the Co-pilot first.");
+    await postToResponseUrl(
+      responseUrl,
+      "No active timesheet session found. Run the Co-pilot first."
+    );
+    return;
   }
 
   const approvedDrafts = convo.drafts.filter((d) => d.approved);
   if (approvedDrafts.length === 0) {
     await clearConversation(userId);
-    return slackResponse("\u2705 No entries to write. Session closed.");
+    await postToResponseUrl(
+      responseUrl,
+      "\u2705 No entries to write. Session closed."
+    );
+    return;
   }
 
-  // Write all approved drafts to Scoro
+  // Write all approved drafts to Scoro (the slow part)
   const results = await finaliseAndWrite(convo);
   await clearConversation(userId);
 
-  // Build summary
   const written = results.filter((r) => !r.error && r.action !== "skipped");
   const failed = results.filter((r) => r.error);
 
@@ -90,60 +128,79 @@ async function handleLooksRight(userId: string): Promise<NextResponse> {
 
   summary += "\n\nHave a good evening.";
 
-  return slackResponse(summary);
+  await postToResponseUrl(responseUrl, summary);
 }
 
-async function handleAddTime(userId: string): Promise<NextResponse> {
+async function handleAddTime(
+  userId: string,
+  responseUrl: string
+): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    return slackResponse("No active timesheet session found. Run the Co-pilot first.");
+    await postToResponseUrl(
+      responseUrl,
+      "No active timesheet session found. Run the Co-pilot first."
+    );
+    return;
   }
 
   convo.step = "editing";
   await saveConversation(convo);
 
-  return slackResponse(
+  await postToResponseUrl(
+    responseUrl,
     "What did you work on? Type something like:\n\u2022 _\"2 hours on the Garnier deck\"_\n\u2022 _\"30 mins L'Or\u00e9al creative review\"_\n\nI'll match it to a project and add the time entry."
   );
 }
 
-async function handleFixEntry(userId: string): Promise<NextResponse> {
+async function handleFixEntry(
+  userId: string,
+  responseUrl: string
+): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    return slackResponse("No active timesheet session found. Run the Co-pilot first.");
+    await postToResponseUrl(
+      responseUrl,
+      "No active timesheet session found. Run the Co-pilot first."
+    );
+    return;
   }
 
   const draftList = convo.drafts
     .filter((d) => d.approved)
-    .map((d, i) => `${i + 1}. ${d.eventTitle} \u2192 ${d.projectName || "unmatched"}`)
+    .map(
+      (d, i) =>
+        `${i + 1}. ${d.eventTitle} \u2192 ${d.projectName || "unmatched"}`
+    )
     .join("\n");
 
   if (!draftList) {
-    return slackResponse("No entries to fix. Try *Add time* instead.");
+    await postToResponseUrl(
+      responseUrl,
+      "No entries to fix. Try *Add time* instead."
+    );
+    return;
   }
 
-  // Keep step as review_matches for now; the fix flow will be built next
   await saveConversation(convo);
 
-  return slackResponse(
+  await postToResponseUrl(
+    responseUrl,
     `Which entry needs fixing?\n\n${draftList}\n\nReply with the number or describe what's wrong. (Fix flow coming soon.)`
   );
 }
 
-// ---------------------------------------------------------------------------
-// Confirm / reject pending entry
-// ---------------------------------------------------------------------------
-function formatDuration(mins: number): string {
-  if (mins < 60) return `${mins}m`;
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return m > 0 ? `${h}h ${m}m` : `${h}h`;
-}
-
-async function handleConfirmEntry(userId: string): Promise<NextResponse> {
+async function handleConfirmEntry(
+  userId: string,
+  responseUrl: string
+): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo || !convo.pendingEntry) {
-    return slackResponse("Nothing to confirm. Try *Add time* first.");
+    await postToResponseUrl(
+      responseUrl,
+      "Nothing to confirm. Try *Add time* first."
+    );
+    return;
   }
 
   const pe = convo.pendingEntry;
@@ -172,28 +229,34 @@ async function handleConfirmEntry(userId: string): Promise<NextResponse> {
   const dur = formatDuration(pe.durationMinutes);
   const project = pe.projectName || "unknown project";
 
-  return slackResponse(
+  await postToResponseUrl(
+    responseUrl,
     `\u2705 Added: ${dur} on ${project}.\n\nAnything else? Type another entry, or tap *Looks right* on the original message when you're done.`
   );
 }
 
-async function handleRejectEntry(userId: string): Promise<NextResponse> {
+async function handleRejectEntry(
+  userId: string,
+  responseUrl: string
+): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo || !convo.pendingEntry) {
-    return slackResponse("Nothing to reject.");
+    await postToResponseUrl(responseUrl, "Nothing to reject.");
+    return;
   }
 
   convo.pendingEntry = null;
   convo.step = "editing";
   await saveConversation(convo);
 
-  return slackResponse(
+  await postToResponseUrl(
+    responseUrl,
     "No worries. Try rephrasing with a clearer project or client name, like:\n\u2022 _\"1h Wella TikTok edits\"_\n\u2022 _\"45 mins Garnier shoot brief\"_"
   );
 }
 
 // ---------------------------------------------------------------------------
-// POST handler — Slack interactivity callback
+// POST handler — acknowledge immediately, defer work with after()
 // ---------------------------------------------------------------------------
 export async function POST(request: NextRequest) {
   const signingSecret = process.env.SLACK_SIGNING_SECRET;
@@ -205,10 +268,8 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Slack sends the body as application/x-www-form-urlencoded
   const rawBody = await request.text();
 
-  // Verify request signature
   const timestamp = request.headers.get("x-slack-request-timestamp") || "";
   const signature = request.headers.get("x-slack-signature") || "";
 
@@ -217,7 +278,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
   }
 
-  // Parse the form-encoded payload field
   const params = new URLSearchParams(rawBody);
   const payloadStr = params.get("payload");
   if (!payloadStr) {
@@ -226,11 +286,12 @@ export async function POST(request: NextRequest) {
 
   const payload = JSON.parse(payloadStr);
   const userId: string = payload.user?.id || "";
+  const responseUrl: string = payload.response_url || "";
   const actions: Array<{ action_id: string; value?: string }> =
     payload.actions || [];
 
   if (!userId || actions.length === 0) {
-    return NextResponse.json({ text: "Nothing to do." });
+    return new NextResponse(null, { status: 200 });
   }
 
   const actionId = actions[0].action_id;
@@ -239,19 +300,45 @@ export async function POST(request: NextRequest) {
     `Slack interaction: user=${payload.user?.username || userId} action_id=${actionId}`
   );
 
-  switch (actionId) {
-    case "looks_right":
-      return handleLooksRight(userId);
-    case "add_time":
-      return handleAddTime(userId);
-    case "fix_entry":
-      return handleFixEntry(userId);
-    case "confirm_entry":
-      return handleConfirmEntry(userId);
-    case "reject_entry":
-      return handleRejectEntry(userId);
-    default:
-      console.warn(`Unknown action_id: ${actionId}`);
-      return slackResponse(`Unknown action: ${actionId}`);
-  }
+  // Acknowledge immediately, run handler in background
+  after(async () => {
+    try {
+      switch (actionId) {
+        case "looks_right":
+          await handleLooksRight(userId, responseUrl);
+          break;
+        case "add_time":
+          await handleAddTime(userId, responseUrl);
+          break;
+        case "fix_entry":
+          await handleFixEntry(userId, responseUrl);
+          break;
+        case "confirm_entry":
+          await handleConfirmEntry(userId, responseUrl);
+          break;
+        case "reject_entry":
+          await handleRejectEntry(userId, responseUrl);
+          break;
+        default:
+          console.warn(`Unknown action_id: ${actionId}`);
+          if (responseUrl) {
+            await postToResponseUrl(
+              responseUrl,
+              `Unknown action: ${actionId}`
+            );
+          }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`Interaction handler error (${actionId}):`, msg);
+      if (responseUrl) {
+        await postToResponseUrl(
+          responseUrl,
+          `Something went wrong: ${msg}`
+        ).catch(() => {});
+      }
+    }
+  });
+
+  return new NextResponse(null, { status: 200 });
 }

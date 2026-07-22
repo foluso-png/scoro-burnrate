@@ -3,7 +3,7 @@
 //   SLACK_BOT_TOKEN       - for posting replies
 //   ANTHROPIC_API_KEY     - for AI matching
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import crypto from "crypto";
 import {
   loadConversation,
@@ -40,10 +40,8 @@ function verifySlackSignature(
 // Duration parsing
 // ---------------------------------------------------------------------------
 function parseDurationMinutes(text: string): number | null {
-  // "1.5h", "1.5 hours", "1h30m", "1 hour 30 mins", "90 mins", "2h", "30m"
   const normalized = text.toLowerCase();
 
-  // Try "Xh Ym" or "Xh" or "Ym" patterns
   const hm = normalized.match(
     /(\d+(?:\.\d+)?)\s*h(?:ours?|rs?|r)?\s*(?:(\d+)\s*m(?:ins?|inutes?)?)?/
   );
@@ -53,13 +51,11 @@ function parseDurationMinutes(text: string): number | null {
     return Math.round(hours * 60) + mins;
   }
 
-  // Try standalone minutes: "30 mins", "90 minutes"
   const mOnly = normalized.match(/(\d+)\s*m(?:ins?|inutes?)?/);
   if (mOnly) {
     return parseInt(mOnly[1], 10);
   }
 
-  // Try bare number with "hours": "2 hours"
   const hoursOnly = normalized.match(/(\d+(?:\.\d+)?)\s*hours?/);
   if (hoursOnly) {
     return Math.round(parseFloat(hoursOnly[1]) * 60);
@@ -107,7 +103,6 @@ async function handleFreeTextEntry(
   const convo = await loadConversation(userId);
   if (!convo || convo.step !== "editing") return;
 
-  // Parse duration from the message
   const durationMinutes = parseDurationMinutes(text);
   if (!durationMinutes || durationMinutes <= 0) {
     await postSlackReply(
@@ -126,7 +121,6 @@ async function handleFreeTextEntry(
     return;
   }
 
-  // Run the existing matcher with the user's text as a synthetic event
   const lookup = await getProjectLookup();
   const activeProjects = lookup.projects.filter(
     (p) => p.status === "inprogress"
@@ -155,7 +149,6 @@ async function handleFreeTextEntry(
     return;
   }
 
-  // Store the pending entry
   convo.pendingEntry = {
     text,
     durationMinutes,
@@ -172,7 +165,6 @@ async function handleFreeTextEntry(
   convo.slackChannelId = channelId;
   await saveConversation(convo);
 
-  // Build confirmation message
   const dur = formatDuration(durationMinutes);
   const project = match.project_name || "unknown project";
   const client = match.client_name ? ` (${match.client_name})` : "";
@@ -218,7 +210,7 @@ async function handleFreeTextEntry(
 }
 
 // ---------------------------------------------------------------------------
-// POST handler — Slack Events API
+// POST handler — acknowledge immediately, defer work with after()
 // ---------------------------------------------------------------------------
 export async function POST(request: NextRequest) {
   const signingSecret = process.env.SLACK_SIGNING_SECRET;
@@ -242,7 +234,7 @@ export async function POST(request: NextRequest) {
 
   const body = JSON.parse(rawBody);
 
-  // Handle Slack URL verification challenge
+  // Handle Slack URL verification challenge (must respond synchronously)
   if (body.type === "url_verification") {
     return NextResponse.json({ challenge: body.challenge });
   }
@@ -268,17 +260,20 @@ export async function POST(request: NextRequest) {
   const channelId: string = event.channel;
   const text: string = event.text || "";
 
-  // Acknowledge immediately, process in background.
-  // In Next.js edge/serverless we can't truly background work, but the
-  // handler is fast enough (matcher call is the slowest part).
-  // Slack retries if we don't respond within 3 seconds, so we respond
-  // first and use waitUntil if available, otherwise just await.
-
-  // Check if user has an active editing conversation
-  const convo = await loadConversation(userId);
-  if (convo && convo.step === "editing") {
-    await handleFreeTextEntry(userId, channelId, text);
-  }
+  // Acknowledge immediately, process in background
+  after(async () => {
+    try {
+      const convo = await loadConversation(userId);
+      if (convo && convo.step === "editing") {
+        await handleFreeTextEntry(userId, channelId, text);
+      }
+    } catch (err) {
+      console.error(
+        "Slack event handler error:",
+        err instanceof Error ? err.message : err
+      );
+    }
+  });
 
   return new NextResponse(null, { status: 200 });
 }
