@@ -11,6 +11,7 @@ import {
   DraftEntry,
 } from "@/lib/conversation";
 import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
+import { runCopilotSummary } from "@/lib/copilot-summary";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -98,6 +99,15 @@ function buildActionButtons(): Record<string, unknown> {
         },
         action_id: "fix_entry",
       },
+      {
+        type: "button",
+        text: {
+          type: "plain_text",
+          text: "\ud83d\udd04 Wrap up my day",
+          emoji: true,
+        },
+        action_id: "wrap_up",
+      },
     ],
   };
 }
@@ -176,7 +186,7 @@ async function handleLooksRight(
       .join("\n");
   }
 
-  summary += "\n\nHave a good evening.";
+  summary += "\n\nAll done. Have a good evening!";
 
   await postToResponseUrl(responseUrl, summary);
 }
@@ -403,6 +413,27 @@ async function handleRejectFix(
   );
 }
 
+async function handleWrapUp(
+  userId: string,
+  responseUrl: string,
+  channelId: string
+): Promise<void> {
+  await postToResponseUrl(responseUrl, "Running your summary\u2026");
+
+  try {
+    await runCopilotSummary(userId, {
+      channelId,
+      writeToScoro: false,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await postToResponseUrl(
+      responseUrl,
+      `Something went wrong running your summary: ${msg}`
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // POST handler — acknowledge immediately, defer work with after()
 // ---------------------------------------------------------------------------
@@ -435,6 +466,7 @@ export async function POST(request: NextRequest) {
   const payload = JSON.parse(payloadStr);
   const userId: string = payload.user?.id || "";
   const responseUrl: string = payload.response_url || "";
+  const channelId: string = payload.channel?.id || userId;
   const actions: Array<{ action_id: string; value?: string }> =
     payload.actions || [];
 
@@ -472,6 +504,9 @@ export async function POST(request: NextRequest) {
           break;
         case "reject_fix":
           await handleRejectFix(userId, responseUrl);
+          break;
+        case "wrap_up":
+          await handleWrapUp(userId, responseUrl, channelId);
           break;
         default:
           console.warn(`Unknown action_id: ${actionId}`);

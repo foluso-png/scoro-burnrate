@@ -12,8 +12,9 @@ import {
 import {
   matchEvents,
   getProjectLookup,
-  splitActivities,
+  splitAndMatchFreeText,
 } from "@/lib/matcher";
+import { runCopilotSummary } from "@/lib/copilot-summary";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -107,9 +108,13 @@ async function handleFreeTextEntry(
   const convo = await loadConversation(userId);
   if (!convo || convo.step !== "editing") return;
 
-  // Use AI to split the message into individual activities with durations
-  const activities = await splitActivities(text);
-  const withDuration = activities.filter((a) => a.durationMinutes > 0);
+  // Single AI call: split into activities, extract durations, match to projects
+  const lookup = await getProjectLookup();
+  const activeProjects = lookup.projects.filter(
+    (p) => p.status === "inprogress"
+  );
+  const entries = await splitAndMatchFreeText(text, activeProjects);
+  const withDuration = entries.filter((a) => a.durationMinutes > 0);
 
   if (withDuration.length === 0) {
     await postSlackReply(
@@ -128,29 +133,19 @@ async function handleFreeTextEntry(
     return;
   }
 
-  // Match each activity to a project
-  const lookup = await getProjectLookup();
-  const activeProjects = lookup.projects.filter(
-    (p) => p.status === "inprogress"
-  );
-  const matches = await matchEvents(withDuration, activeProjects);
-
-  // Build pending entries from matches
-  const pendingEntries = withDuration.map((activity) => {
-    const match = matches.find((m) => m.event_id === activity.id);
-    return {
-      text: activity.title,
-      durationMinutes: activity.durationMinutes,
-      projectId: match?.project_id ?? null,
-      projectName: match?.project_name ?? null,
-      clientName: match?.client_name ?? null,
-      taskId: match?.task_id ?? null,
-      taskTitle: match?.task_title ?? null,
-      confidence: (match?.confidence ?? "low") as "high" | "medium" | "low",
-      description: match?.description ?? activity.title,
-      isInternal: match?.is_internal ?? false,
-    };
-  });
+  // Build pending entries from combined results
+  const pendingEntries = withDuration.map((entry) => ({
+    text: entry.title,
+    durationMinutes: entry.durationMinutes,
+    projectId: entry.project_id,
+    projectName: entry.project_name,
+    clientName: entry.client_name,
+    taskId: entry.task_id,
+    taskTitle: entry.task_title,
+    confidence: entry.confidence,
+    description: entry.description,
+    isInternal: entry.is_internal,
+  }));
 
   const matched = pendingEntries.filter((e) => e.projectId !== null);
   if (matched.length === 0) {
@@ -267,15 +262,41 @@ async function handleFixText(
       }
     }
 
-    // If no number match, try to match by event title substring
+    // If no number match, try to match by distinctive words in the title
     if (draftIdx === null) {
-      const lower = text.toLowerCase();
-      const matched = approvedDrafts.find((d) =>
-        d.eventTitle.toLowerCase().includes(lower) ||
-        lower.includes(d.eventTitle.toLowerCase().split(" ")[0])
-      );
-      if (matched) {
-        draftIdx = convo.drafts.indexOf(matched);
+      const noise = new Set([
+        "a", "an", "the", "my", "with", "on", "in", "for", "and", "or",
+        "to", "of", "is", "was", "not", "no", "it", "-", "/", "&", "—",
+        "meeting", "catch", "up", "call", "chat", "sync", "discussion",
+        "actually", "should", "be", "time", "hour", "hours", "mins",
+        "minutes", "min", "internal", "entry",
+      ]);
+      const tokenise = (s: string): string[] =>
+        s.toLowerCase()
+          .split(/[\s\/\-&,]+/)
+          .filter((w) => w.length > 1 && !noise.has(w));
+
+      const userWords = new Set(tokenise(text));
+
+      // Score each draft by how many of its title words appear in the user's message
+      const scored = approvedDrafts.map((d, i) => {
+        const titleWords = tokenise(d.eventTitle);
+        const hits = titleWords.filter((w) => userWords.has(w)).length;
+        return { draft: d, approvedIdx: i, hits };
+      });
+
+      // Only consider entries with at least one matching word
+      const withHits = scored.filter((s) => s.hits > 0);
+
+      if (withHits.length === 1) {
+        draftIdx = convo.drafts.indexOf(withHits[0].draft);
+      } else if (withHits.length > 1) {
+        // Pick the best match, but only if it's unambiguous (strictly more hits than runner-up)
+        withHits.sort((a, b) => b.hits - a.hits);
+        if (withHits[0].hits > withHits[1].hits) {
+          draftIdx = convo.drafts.indexOf(withHits[0].draft);
+        }
+        // Otherwise ambiguous — fall through to "couldn't identify" prompt
       }
     }
 
@@ -443,6 +464,44 @@ async function processFixCorrection(
 }
 
 // ---------------------------------------------------------------------------
+// Detect "end my day" trigger phrases
+// ---------------------------------------------------------------------------
+function isEndOfDayTrigger(text: string): boolean {
+  const lower = text.toLowerCase().trim();
+  return /\b(end\s+(my|the|of)\s+day|wrap\s*up|eod|done\s+for\s+(the\s+day|today)|finish(ed)?\s+for\s+(the\s+day|today)|(my|the|run)\s+summary|give\s+me\s+my\s+summary|show\s+(my\s+)?summary|timesheet)\b/i.test(
+    lower
+  );
+}
+
+async function handleEndOfDay(
+  userId: string,
+  channelId: string
+): Promise<void> {
+  try {
+    await runCopilotSummary(userId, {
+      channelId,
+      writeToScoro: false,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("On-demand summary error:", msg);
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `Something went wrong running your summary: ${msg}`,
+          },
+        },
+      ],
+      "Summary error"
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // POST handler — acknowledge immediately, defer work with after()
 // ---------------------------------------------------------------------------
 export async function POST(request: NextRequest) {
@@ -496,6 +555,12 @@ export async function POST(request: NextRequest) {
   // Acknowledge immediately, process in background
   after(async () => {
     try {
+      // Check for "end my day" trigger before conversation state
+      if (isEndOfDayTrigger(text)) {
+        await handleEndOfDay(userId, channelId);
+        return;
+      }
+
       const convo = await loadConversation(userId);
       if (convo && convo.step === "editing") {
         await handleFreeTextEntry(userId, channelId, text);
