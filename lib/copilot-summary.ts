@@ -148,12 +148,14 @@ async function writeDraftsToScoro(
 ): Promise<{ written: WriteResult[]; skipped: MatchResult[] }> {
   const approved = matches.filter(
     (m) =>
+      m.is_trackable !== false &&
       m.project_id !== null &&
       m.task_id !== null &&
       (m.confidence === "high" || m.confidence === "medium")
   );
   const skipped = matches.filter(
     (m) =>
+      m.is_trackable === false ||
       m.project_id === null ||
       m.task_id === null ||
       m.confidence === "low"
@@ -365,12 +367,27 @@ function formatSlackBlocks(
 
   let body = `*I matched ${matchCount} event${matchCount === 1 ? "" : "s"} from your calendar:*\n${matchedLines}`;
 
-  // Low-confidence / skipped events get dropdown blocks (built below)
+  // Split skipped into non-trackable (lunch, personal) vs trackable-but-uncertain
+  const nonTrackable = skipped.filter((s) => s.is_trackable === false);
+  const uncertain = skipped.filter((s) => s.is_trackable !== false);
+
+  // Non-trackable: simple "Not included" line, no dropdown
+  if (nonTrackable.length > 0) {
+    const names = nonTrackable
+      .map((s) => {
+        const event = events.find((e) => e.id === s.event_id);
+        return event ? event.title : s.event_id;
+      })
+      .join(", ");
+    body += `\n\n*Not included:* ${names} (not trackable work)`;
+  }
+
+  // Trackable but uncertain: dropdowns for project selection
   const lowConfBlocks: Record<string, unknown>[] = [];
-  if (skipped.length > 0 && activeProjects.length > 0) {
-    body += `\n\n*Needs your input (${skipped.length}):*`;
-    for (let i = 0; i < skipped.length; i++) {
-      const s = skipped[i];
+  if (uncertain.length > 0 && activeProjects.length > 0) {
+    body += `\n\n*Needs your input (${uncertain.length}):*`;
+    for (let i = 0; i < uncertain.length; i++) {
+      const s = uncertain[i];
       const event = events.find((e) => e.id === s.event_id);
       const title = event?.title || s.event_id;
       const time = event ? timeSlot(event.start, event.end) : "";
@@ -390,14 +407,14 @@ function formatSlackBlocks(
         },
       });
     }
-  } else if (skipped.length > 0) {
-    const skippedNames = skipped
+  } else if (uncertain.length > 0) {
+    const names = uncertain
       .map((s) => {
         const event = events.find((e) => e.id === s.event_id);
         return event ? event.title : s.event_id;
       })
       .join(", ");
-    body += `\n\n*Skipped:* ${skippedNames}`;
+    body += `\n\n*Skipped:* ${names}`;
   }
 
   const failedEntries = written.filter((w) => w.error);
@@ -579,6 +596,7 @@ export async function runCopilotSummary(
         confidence: "high",
         description: `${ev.title} (remembered)`,
         is_internal: ev.isInternal,
+        is_trackable: true,
         reasoning: "Matched from user's event memory",
       });
     } else {
@@ -604,6 +622,7 @@ export async function runCopilotSummary(
     // Still compute skipped for display, but don't write anything
     skipped = matches.filter(
       (m) =>
+        m.is_trackable === false ||
         m.project_id === null ||
         m.task_id === null ||
         m.confidence === "low"
@@ -633,7 +652,9 @@ export async function runCopilotSummary(
     end: e.end,
     isInternal: e.isInternal,
   }));
-  const drafts: DraftEntry[] = matches.map((m) => {
+  // Only create drafts for trackable events (non-trackable are excluded entirely)
+  const trackableMatches = matches.filter((m) => m.is_trackable !== false);
+  const drafts: DraftEntry[] = trackableMatches.map((m) => {
     const event = events.find((e) => e.id === m.event_id);
     return {
       eventId: m.event_id,
@@ -687,11 +708,13 @@ export async function runCopilotSummary(
       description: s.description,
       confidence: s.confidence,
       reason:
-        s.project_id === null
-          ? "no project match"
-          : s.confidence === "low"
-            ? "low confidence"
-            : "no task match",
+        s.is_trackable === false
+          ? "not trackable work"
+          : s.project_id === null
+            ? "no project match"
+            : s.confidence === "low"
+              ? "low confidence"
+              : "no task match",
     })),
   };
 }

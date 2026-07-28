@@ -37,6 +37,7 @@ export interface MatchResult {
   confidence: "high" | "medium" | "low";
   description: string;
   is_internal: boolean;
+  is_trackable: boolean;
   reasoning: string;
 }
 
@@ -412,10 +413,11 @@ RULES:
 - "low" confidence: weak or ambiguous signal.
 - Internal meetings (standups, 1:1s, all-hands) with only @campfire.co.uk attendees should map to the internal time project and an appropriate task, flagged as is_internal: true.
 - If the event is too vague to match any project, return null for project_id and task_id with low confidence.
+- is_trackable: true if the event is work that belongs on a timesheet (client work, internal meetings, admin, training, travel for work). false if it is NOT trackable work (lunch, breaks, personal appointments, gym, dentist, school run, commute, focus/blocked time with no clear work context, holidays, birthdays, social plans, reminders). Use your judgement; the key question is "would an employee log this on a timesheet?"
 - Description: concise summary for a Scoro time entry.
 
 Respond with ONLY a JSON array. Each element:
-{"event_id":"...","project_id":number|null,"project_name":"..."|null,"client_name":"..."|null,"task_id":number|null,"task_title":"..."|null,"confidence":"high"|"medium"|"low","description":"...","is_internal":boolean,"reasoning":"one sentence"}`;
+{"event_id":"...","project_id":number|null,"project_name":"..."|null,"client_name":"..."|null,"task_id":number|null,"task_title":"..."|null,"confidence":"high"|"medium"|"low","description":"...","is_internal":boolean,"is_trackable":boolean,"reasoning":"one sentence"}`;
 
   const userMessage = JSON.stringify(
     events.map((e) => ({
