@@ -270,6 +270,43 @@ export function timeSlot(startISO: string, endISO: string): string {
 // Change this constant to switch models if accuracy needs tuning.
 const FREE_TEXT_MODEL = "claude-haiku-4-5-20251001";
 
+// ---------------------------------------------------------------------------
+// AI intent classification — detect end-of-day / wrap-up messages
+// ---------------------------------------------------------------------------
+export async function classifyEndOfDayIntent(
+  text: string
+): Promise<boolean> {
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  const response = await anthropic.messages.create({
+    model: FREE_TEXT_MODEL,
+    max_tokens: 10,
+    system: `You classify Slack messages from an employee to a timesheet bot. Your ONLY job is to decide whether the message is an "end of day" or "wrap up" intent, meaning the person wants to finish up, get their summary, or close out their timesheet for the day.
+
+Answer YES if the message means any of:
+- They are done for the day / finished working
+- They want their end-of-day summary
+- They want to wrap up / close out
+- They are saying goodbye or signing off
+
+Answer NO if the message is:
+- A time entry (contains a duration like "30 mins", "1 hour", "2h")
+- A project or client name
+- A correction or instruction about an existing entry
+- A question or request unrelated to wrapping up
+- Ambiguous or unclear
+
+Respond with ONLY "YES" or "NO".`,
+    messages: [{ role: "user", content: text }],
+  });
+
+  const reply =
+    response.content[0].type === "text"
+      ? response.content[0].text.trim().toUpperCase()
+      : "";
+  return reply === "YES";
+}
+
 export interface FreeTextEntry {
   id: string;
   title: string;

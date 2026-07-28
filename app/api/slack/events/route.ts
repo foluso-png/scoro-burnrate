@@ -13,6 +13,7 @@ import {
   matchEvents,
   getProjectLookup,
   splitAndMatchFreeText,
+  classifyEndOfDayIntent,
 } from "@/lib/matcher";
 import { runCopilotSummary } from "@/lib/copilot-summary";
 
@@ -464,13 +465,13 @@ async function processFixCorrection(
 }
 
 // ---------------------------------------------------------------------------
-// Detect "end my day" trigger phrases
+// End-of-day detection
 // ---------------------------------------------------------------------------
-function isEndOfDayTrigger(text: string): boolean {
-  const lower = text.toLowerCase().trim();
-  return /\b(end\s+(my|the|of)\s+day|wrap\s*up|eod|done\s+for\s+(the\s+day|today)|finish(ed)?\s+for\s+(the\s+day|today)|(my|the|run)\s+summary|give\s+me\s+my\s+summary|show\s+(my\s+)?summary|timesheet)\b/i.test(
-    lower
-  );
+
+// Quick check: does the message contain an obvious time duration?
+// If so, it's a time entry, not an end-of-day trigger.
+function looksLikeTimeEntry(text: string): boolean {
+  return /\d+\s*(h(ours?|rs?|r)?|m(ins?|inutes?)?)\b/i.test(text);
 }
 
 async function handleEndOfDay(
@@ -555,10 +556,15 @@ export async function POST(request: NextRequest) {
   // Acknowledge immediately, process in background
   after(async () => {
     try {
-      // Check for "end my day" trigger before conversation state
-      if (isEndOfDayTrigger(text)) {
-        await handleEndOfDay(userId, channelId);
-        return;
+      // If the message doesn't look like a time entry, check if it's
+      // an end-of-day intent (via AI). This runs before conversation
+      // state so "wrap up" works even mid-session.
+      if (!looksLikeTimeEntry(text)) {
+        const isEod = await classifyEndOfDayIntent(text);
+        if (isEod) {
+          await handleEndOfDay(userId, channelId);
+          return;
+        }
       }
 
       const convo = await loadConversation(userId);
