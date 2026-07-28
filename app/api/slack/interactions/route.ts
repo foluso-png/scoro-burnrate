@@ -535,6 +535,71 @@ async function handleSelectProject(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Task dropdown selection for uncertain task matches
+// ---------------------------------------------------------------------------
+async function handleSelectTask(
+  userId: string,
+  responseUrl: string,
+  blockId: string,
+  selectedValue: string
+): Promise<void> {
+  const convo = await loadConversation(userId);
+  if (!convo) {
+    await postToResponseUrl(responseUrl, "No active session found.");
+    return;
+  }
+
+  // blockId is "task_conf_0", "task_conf_1", etc.
+  const taskConfIdx = parseInt(blockId.replace("task_conf_", ""), 10);
+  const taskUncertainDrafts = convo.drafts.filter(
+    (d) => d.approved && d.taskUncertain
+  );
+
+  if (isNaN(taskConfIdx) || taskConfIdx >= taskUncertainDrafts.length) {
+    await postToResponseUrl(responseUrl, "Could not identify the entry.");
+    return;
+  }
+
+  const draft = taskUncertainDrafts[taskConfIdx];
+  const draftIdx = convo.drafts.indexOf(draft);
+  const taskId = parseInt(selectedValue, 10);
+  if (isNaN(taskId)) {
+    await postToResponseUrl(responseUrl, "Invalid task selection.");
+    return;
+  }
+
+  // Look up task name from project data
+  const lookup = await getProjectLookup();
+  const project = draft.projectId
+    ? lookup.projects.find((p) => p.project_id === draft.projectId)
+    : null;
+  const task = project?.tasks.find((t) => t.task_id === taskId) || null;
+
+  convo.drafts[draftIdx] = {
+    ...draft,
+    taskId,
+    taskTitle: task?.title || draft.taskTitle,
+    taskUncertain: false,
+  };
+  await saveConversation(convo);
+
+  // Update event memory with the confirmed task
+  if (draft.startDatetime && draft.projectId) {
+    await saveEventMapping(userId, draft.eventTitle, {
+      project_id: draft.projectId,
+      project_name: draft.projectName || "",
+      task_id: taskId,
+      task_title: task?.title || null,
+    });
+  }
+
+  await postResponseWithButtons(
+    responseUrl,
+    `Updated *${draft.eventTitle}* task to *${task?.title || "unknown"}*. Saved for next time.`
+  );
+}
+
 async function handleWrapUp(
   userId: string,
   responseUrl: string,
@@ -640,6 +705,18 @@ export async function POST(request: NextRequest) {
             responseUrl,
             blockId,
             selectedValue
+          );
+          break;
+        }
+        case "select_task": {
+          const taskBlockId = actions[0].block_id || "";
+          const taskValue =
+            actions[0].selected_option?.value || "";
+          await handleSelectTask(
+            userId,
+            responseUrl,
+            taskBlockId,
+            taskValue
           );
           break;
         }

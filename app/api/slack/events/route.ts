@@ -8,6 +8,7 @@ import crypto from "crypto";
 import {
   loadConversation,
   saveConversation,
+  clearConversation,
 } from "@/lib/conversation";
 import {
   matchEvents,
@@ -16,6 +17,8 @@ import {
   classifyEndOfDayIntent,
 } from "@/lib/matcher";
 import { runCopilotSummary } from "@/lib/copilot-summary";
+import { finaliseAndWrite } from "@/lib/scoro-writer";
+import { saveEventMapping } from "@/lib/event-memory";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -465,6 +468,17 @@ async function processFixCorrection(
 }
 
 // ---------------------------------------------------------------------------
+// Loading indicator
+// ---------------------------------------------------------------------------
+async function postThinking(channelId: string): Promise<void> {
+  await postSlackReply(
+    channelId,
+    [{ type: "section", text: { type: "mrkdwn", text: "\ud83e\udd14 Working on it\u2026" } }],
+    "Working on it..."
+  );
+}
+
+// ---------------------------------------------------------------------------
 // End-of-day detection
 // ---------------------------------------------------------------------------
 
@@ -478,6 +492,7 @@ async function handleEndOfDay(
   userId: string,
   channelId: string
 ): Promise<void> {
+  await postThinking(channelId);
   try {
     await runCopilotSummary(userId, {
       channelId,
@@ -500,6 +515,75 @@ async function handleEndOfDay(
       "Summary error"
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// "Done" intent — user is confirming they're finished, finalise entries
+// ---------------------------------------------------------------------------
+async function handleDoneConfirm(
+  userId: string,
+  channelId: string
+): Promise<void> {
+  const convo = await loadConversation(userId);
+  if (!convo) {
+    // No active session; treat as summary request instead
+    await handleEndOfDay(userId, channelId);
+    return;
+  }
+
+  const approvedDrafts = convo.drafts.filter((d) => d.approved);
+  if (approvedDrafts.length === 0) {
+    await clearConversation(userId);
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: "\u2705 No entries to write. Session closed." } }],
+      "Session closed"
+    );
+    return;
+  }
+
+  await postThinking(channelId);
+
+  const results = await finaliseAndWrite(convo);
+
+  // Save confirmed event->project mappings for future memory
+  for (const d of approvedDrafts) {
+    if (!d.startDatetime || !d.projectId) continue;
+    await saveEventMapping(userId, d.eventTitle, {
+      project_id: d.projectId,
+      project_name: d.projectName || "",
+      task_id: d.taskId,
+      task_title: d.taskTitle,
+    });
+  }
+
+  await clearConversation(userId);
+
+  const written = results.filter((r) => !r.error && r.action !== "skipped");
+  const failed = results.filter((r) => r.error);
+
+  let summary = `\u2705 Done. ${written.length} entry${written.length === 1 ? "" : "s"} written to Scoro:\n`;
+  summary += written
+    .map(
+      (r) =>
+        `\u2022 ${r.durationMinutes < 60 ? `${r.durationMinutes}m` : `${Math.floor(r.durationMinutes / 60)}h${r.durationMinutes % 60 > 0 ? ` ${r.durationMinutes % 60}m` : ""}`} ${r.projectName || "unknown"} (${r.action})`
+    )
+    .join("\n");
+
+  if (failed.length > 0) {
+    summary += `\n\n\u26a0\ufe0f ${failed.length} failed:\n`;
+    summary += failed
+      .map((r) => `\u2022 ${r.eventTitle}: ${r.error}`)
+      .join("\n");
+  }
+
+  summary += "\n\nAll done. Have a good evening!";
+
+  await postSlackReply(
+    channelId,
+    [{ type: "section", text: { type: "mrkdwn", text: summary } }],
+    summary
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -558,19 +642,25 @@ export async function POST(request: NextRequest) {
     try {
       // If the message doesn't look like a time entry, check if it's
       // an end-of-day intent (via AI). This runs before conversation
-      // state so "wrap up" works even mid-session.
+      // state so "wrap up" / "done" works even mid-session.
       if (!looksLikeTimeEntry(text)) {
-        const isEod = await classifyEndOfDayIntent(text);
-        if (isEod) {
+        const intent = await classifyEndOfDayIntent(text);
+        if (intent === "summary") {
           await handleEndOfDay(userId, channelId);
+          return;
+        }
+        if (intent === "done") {
+          await handleDoneConfirm(userId, channelId);
           return;
         }
       }
 
       const convo = await loadConversation(userId);
       if (convo && convo.step === "editing") {
+        await postThinking(channelId);
         await handleFreeTextEntry(userId, channelId, text);
       } else if (convo && convo.step === "fixing") {
+        await postThinking(channelId);
         await handleFixText(userId, channelId, text);
       }
     } catch (err) {
