@@ -35,6 +35,7 @@ export interface MatchResult {
   task_id: number | null;
   task_title: string | null;
   confidence: "high" | "medium" | "low";
+  task_confident: boolean;
   description: string;
   is_internal: boolean;
   is_trackable: boolean;
@@ -274,30 +275,27 @@ const FREE_TEXT_MODEL = "claude-haiku-4-5-20251001";
 // ---------------------------------------------------------------------------
 // AI intent classification — detect end-of-day / wrap-up messages
 // ---------------------------------------------------------------------------
+export type EodIntent = "summary" | "done" | "none";
+
 export async function classifyEndOfDayIntent(
   text: string
-): Promise<boolean> {
+): Promise<EodIntent> {
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   const response = await anthropic.messages.create({
     model: FREE_TEXT_MODEL,
     max_tokens: 10,
-    system: `You classify Slack messages from an employee to a timesheet bot. Your ONLY job is to decide whether the message is an "end of day" or "wrap up" intent, meaning the person wants to finish up, get their summary, or close out their timesheet for the day.
+    system: `You classify Slack messages from an employee to a timesheet bot. Decide which intent applies:
 
-Answer YES if the message means any of:
-- They are done for the day / finished working
-- They want their end-of-day summary
-- They want to wrap up / close out
-- They are saying goodbye or signing off
+SUMMARY — The user wants to see their end-of-day summary, run the timesheet copilot, or start wrapping up. They want to SEE something.
+Examples: "wrap up my day", "show me my summary", "what does my timesheet look like", "run my summary", "let's wrap up"
 
-Answer NO if the message is:
-- A time entry (contains a duration like "30 mins", "1 hour", "2h")
-- A project or client name
-- A correction or instruction about an existing entry
-- A question or request unrelated to wrapping up
-- Ambiguous or unclear
+DONE — The user is confirming they are FINISHED. They have already been reviewing entries and are saying everything looks good, nothing more to add, they are satisfied. This is a confirmation, not a request.
+Examples: "that's everything", "all done", "I'm finished", "that's everything done", "nothing else to add", "yep that's right", "looks good thanks", "that's it"
 
-Respond with ONLY "YES" or "NO".`,
+NONE — Anything else: time entries (contains durations), project names, corrections, questions, greetings, or anything ambiguous.
+
+Respond with ONLY one word: SUMMARY, DONE, or NONE.`,
     messages: [{ role: "user", content: text }],
   });
 
@@ -305,7 +303,9 @@ Respond with ONLY "YES" or "NO".`,
     response.content[0].type === "text"
       ? response.content[0].text.trim().toUpperCase()
       : "";
-  return reply === "YES";
+  if (reply === "SUMMARY") return "summary";
+  if (reply === "DONE") return "done";
+  return "none";
 }
 
 export interface FreeTextEntry {
@@ -407,7 +407,8 @@ ${projectBlocks.join("\n")}
 RULES:
 - Match each event to ONE project and ONE task within it, or null if no good match.
 - Pick the task whose title best fits the event context: "creative review" -> a Creative role/task; "shoot brief" -> a Production or Creator Marketing task; "retainer review" -> Account Manager task; vague meetings -> a general/admin task if available.
-- If no task is a strong fit, pick the first available task for that project.
+- If no task is a strong fit, pick the first available task for that project and set task_confident to false.
+- task_confident: true if the event clearly maps to a specific task (e.g. "creative review" clearly maps to a Creative task). false if the task is a guess because tasks are role-based (e.g. "Senior Account Manager", "Project Manager", "Creative Director") and you cannot tell which role the user holds, or if the event is too generic to distinguish between tasks. Always true when there is only one task on the project.
 - "high" confidence: clear brand/client name match in event title or attendee domain.
 - "medium" confidence: likely match from partial name, context clues, or attendee domain.
 - "low" confidence: weak or ambiguous signal.
@@ -417,7 +418,7 @@ RULES:
 - Description: concise summary for a Scoro time entry.
 
 Respond with ONLY a JSON array. Each element:
-{"event_id":"...","project_id":number|null,"project_name":"..."|null,"client_name":"..."|null,"task_id":number|null,"task_title":"..."|null,"confidence":"high"|"medium"|"low","description":"...","is_internal":boolean,"is_trackable":boolean,"reasoning":"one sentence"}`;
+{"event_id":"...","project_id":number|null,"project_name":"..."|null,"client_name":"..."|null,"task_id":number|null,"task_title":"..."|null,"confidence":"high"|"medium"|"low","task_confident":boolean,"description":"...","is_internal":boolean,"is_trackable":boolean,"reasoning":"one sentence"}`;
 
   const userMessage = JSON.stringify(
     events.map((e) => ({

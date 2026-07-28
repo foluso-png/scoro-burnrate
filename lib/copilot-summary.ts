@@ -294,6 +294,27 @@ function buildProjectDropdownOptions(
   return options;
 }
 
+function buildTaskDropdownOptions(
+  project: ProjectRecord,
+  suggestedTaskId: number | null
+): {
+  options: Array<{ text: { type: string; text: string }; value: string }>;
+  initialOption: { text: { type: string; text: string }; value: string } | null;
+} {
+  if (project.tasks.length <= 1) return { options: [], initialOption: null };
+
+  const options = project.tasks.map((t) => ({
+    text: { type: "plain_text" as const, text: t.title.slice(0, 75) },
+    value: String(t.task_id),
+  }));
+
+  const initialOption = suggestedTaskId
+    ? options.find((o) => o.value === String(suggestedTaskId)) || null
+    : null;
+
+  return { options, initialOption };
+}
+
 function formatSlackBlocks(
   events: CalendarEvent[],
   written: WriteResult[],
@@ -366,6 +387,43 @@ function formatSlackBlocks(
   }
 
   let body = `*I matched ${matchCount} event${matchCount === 1 ? "" : "s"} from your calendar:*\n${matchedLines}`;
+
+  // Task-uncertain: project matched but task is a guess (preview mode only)
+  const taskUncertainBlocks: Record<string, unknown>[] = [];
+  if (!didWrite) {
+    const taskUncertain = approvedMatches.filter(
+      (m) => m.task_confident === false && m.project_id !== null
+    );
+    if (taskUncertain.length > 0) {
+      body += "\n\n*Pick the right task/role:*";
+      for (let i = 0; i < taskUncertain.length; i++) {
+        const m = taskUncertain[i];
+        const project = activeProjects.find((p) => p.project_id === m.project_id);
+        if (!project || project.tasks.length <= 1) continue;
+        const event = events.find((e) => e.id === m.event_id);
+        const title = event?.title || m.event_id;
+        const time = event ? timeSlot(event.start, event.end) : "";
+        const { options, initialOption } = buildTaskDropdownOptions(project, m.task_id);
+        if (options.length === 0) continue;
+        const accessory: Record<string, unknown> = {
+          type: "static_select",
+          action_id: "select_task",
+          placeholder: { type: "plain_text", text: "Pick your role/task..." },
+          options,
+        };
+        if (initialOption) accessory.initial_option = initialOption;
+        taskUncertainBlocks.push({
+          type: "section",
+          block_id: `task_conf_${i}`,
+          text: {
+            type: "mrkdwn",
+            text: `${time} *${title}* \u2192 ${m.project_name}`,
+          },
+          accessory,
+        });
+      }
+    }
+  }
 
   // Split skipped into non-trackable (lunch, personal) vs trackable-but-uncertain
   const nonTrackable = skipped.filter((s) => s.is_trackable === false);
@@ -447,6 +505,7 @@ function formatSlackBlocks(
         },
       },
       { type: "section", text: { type: "mrkdwn", text: body } },
+      ...taskUncertainBlocks,
       ...lowConfBlocks,
       { type: "divider" },
       buildSummaryActionButtons(),
@@ -594,6 +653,7 @@ export async function runCopilotSummary(
         task_id: mapping.task_id,
         task_title: mapping.task_title,
         confidence: "high",
+        task_confident: true,
         description: `${ev.title} (remembered)`,
         is_internal: ev.isInternal,
         is_trackable: true,
@@ -668,6 +728,7 @@ export async function runCopilotSummary(
       approved:
         m.confidence !== "low" && m.project_id !== null && m.task_id !== null,
       remembered: rememberedIds.has(m.event_id),
+      taskUncertain: m.task_confident === false && m.project_id !== null && m.confidence !== "low",
       scoroEntryId:
         written.find(
           (w) =>
