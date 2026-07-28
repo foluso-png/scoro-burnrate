@@ -12,6 +12,8 @@ import {
 } from "@/lib/conversation";
 import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
 import { runCopilotSummary } from "@/lib/copilot-summary";
+import { saveEventMapping } from "@/lib/event-memory";
+import { getProjectLookup } from "@/lib/matcher";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -166,6 +168,10 @@ async function handleLooksRight(
 
   // Write all approved drafts to Scoro (the slow part)
   const results = await finaliseAndWrite(convo);
+
+  // Save confirmed event→project mappings for future memory
+  await saveMemoryForDrafts(userId, approvedDrafts);
+
   await clearConversation(userId);
 
   const written = results.filter((r) => !r.error && r.action !== "skipped");
@@ -383,6 +389,16 @@ async function handleConfirmFix(
   convo.step = "review_matches";
   await saveConversation(convo);
 
+  // Save corrected mapping to memory (calendar events only)
+  if (draft.startDatetime && draft.projectId) {
+    await saveEventMapping(userId, draft.eventTitle, {
+      project_id: draft.projectId,
+      project_name: draft.projectName || "",
+      task_id: draft.taskId,
+      task_title: draft.taskTitle,
+    });
+  }
+
   const dur = formatDuration(draft.durationMinutes || 0);
   const project = draft.projectName || "unknown project";
   const updated = draft.scoroEntryId ? " Scoro entry updated." : "";
@@ -410,6 +426,112 @@ async function handleRejectFix(
   await postToResponseUrl(
     responseUrl,
     "No worries. Describe the correct project or client more specifically, like:\n\u2022 _\"it was Wella TikTok\"_\n\u2022 _\"should be internal time\"_"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Save event→project memory for calendar-based drafts
+// ---------------------------------------------------------------------------
+async function saveMemoryForDrafts(
+  userId: string,
+  drafts: DraftEntry[]
+): Promise<void> {
+  for (const d of drafts) {
+    // Only save calendar events (have start/end times) with a valid project
+    if (!d.startDatetime || !d.projectId) continue;
+    await saveEventMapping(userId, d.eventTitle, {
+      project_id: d.projectId,
+      project_name: d.projectName || "",
+      task_id: d.taskId,
+      task_title: d.taskTitle,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dropdown selection for low-confidence matches
+// ---------------------------------------------------------------------------
+async function handleSelectProject(
+  userId: string,
+  responseUrl: string,
+  blockId: string,
+  selectedValue: string
+): Promise<void> {
+  const convo = await loadConversation(userId);
+  if (!convo) {
+    await postToResponseUrl(responseUrl, "No active session found.");
+    return;
+  }
+
+  // blockId is "low_conf_0", "low_conf_1", etc.
+  // This maps to the index of skipped/low-confidence drafts
+  const lowConfIdx = parseInt(blockId.replace("low_conf_", ""), 10);
+  const unapprovedDrafts = convo.drafts.filter((d) => !d.approved);
+
+  if (isNaN(lowConfIdx) || lowConfIdx >= unapprovedDrafts.length) {
+    await postToResponseUrl(responseUrl, "Could not identify the entry.");
+    return;
+  }
+
+  const draft = unapprovedDrafts[lowConfIdx];
+  const draftIdx = convo.drafts.indexOf(draft);
+
+  if (selectedValue === "skip") {
+    // Remove the draft entirely
+    convo.drafts.splice(draftIdx, 1);
+    await saveConversation(convo);
+    await postResponseWithButtons(
+      responseUrl,
+      `Skipped *${draft.eventTitle}*.`
+    );
+    return;
+  }
+
+  // Parse "pid:tid" value
+  const [pidStr, tidStr] = selectedValue.split(":");
+  const projectId = parseInt(pidStr, 10);
+  const taskId = parseInt(tidStr, 10) || null;
+
+  // Look up names from project data
+  const lookup = await getProjectLookup();
+  const project = lookup.projects.find((p) => p.project_id === projectId);
+
+  if (!project) {
+    await postToResponseUrl(responseUrl, "Could not find that project.");
+    return;
+  }
+
+  const task = taskId
+    ? project.tasks.find((t) => t.task_id === taskId) || null
+    : project.tasks[0] || null;
+
+  // Update the draft
+  convo.drafts[draftIdx] = {
+    ...draft,
+    projectId: project.project_id,
+    projectName: project.name,
+    taskId: task?.task_id ?? null,
+    taskTitle: task?.title ?? null,
+    confidence: "high",
+    description: draft.description,
+    approved: true,
+  };
+  await saveConversation(convo);
+
+  // Save to event memory for future runs
+  await saveEventMapping(userId, draft.eventTitle, {
+    project_id: project.project_id,
+    project_name: project.name,
+    task_id: task?.task_id ?? null,
+    task_title: task?.title ?? null,
+  });
+
+  const dur = draft.durationMinutes
+    ? formatDuration(draft.durationMinutes)
+    : "";
+  await postResponseWithButtons(
+    responseUrl,
+    `Matched *${draft.eventTitle}* ${dur ? `(${dur}) ` : ""}\u2192 *${project.name}*. Saved for next time.`
   );
 }
 
@@ -467,8 +589,12 @@ export async function POST(request: NextRequest) {
   const userId: string = payload.user?.id || "";
   const responseUrl: string = payload.response_url || "";
   const channelId: string = payload.channel?.id || userId;
-  const actions: Array<{ action_id: string; value?: string }> =
-    payload.actions || [];
+  const actions: Array<{
+    action_id: string;
+    value?: string;
+    block_id?: string;
+    selected_option?: { value: string };
+  }> = payload.actions || [];
 
   if (!userId || actions.length === 0) {
     return new NextResponse(null, { status: 200 });
@@ -505,6 +631,18 @@ export async function POST(request: NextRequest) {
         case "reject_fix":
           await handleRejectFix(userId, responseUrl);
           break;
+        case "select_project": {
+          const blockId = actions[0].block_id || "";
+          const selectedValue =
+            actions[0].selected_option?.value || "";
+          await handleSelectProject(
+            userId,
+            responseUrl,
+            blockId,
+            selectedValue
+          );
+          break;
+        }
         case "wrap_up":
           await handleWrapUp(userId, responseUrl, channelId);
           break;

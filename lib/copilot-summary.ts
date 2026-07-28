@@ -12,7 +12,13 @@ import {
   scoroPost,
   timeSlot,
   MatchResult,
+  ProjectRecord,
 } from "./matcher";
+import {
+  loadEventMemory,
+  normaliseTitle,
+  EventMemory,
+} from "./event-memory";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -241,12 +247,59 @@ export function buildSummaryActionButtons(): Record<string, unknown> {
   };
 }
 
+function buildProjectDropdownOptions(
+  activeProjects: ProjectRecord[],
+  suggestedMatch: MatchResult | null
+): Array<{ text: { type: string; text: string }; value: string }> {
+  const options: Array<{
+    text: { type: string; text: string };
+    value: string;
+  }> = [];
+
+  // AI suggestion first (if it has a project)
+  if (suggestedMatch?.project_id) {
+    const taskId = suggestedMatch.task_id || 0;
+    options.push({
+      text: {
+        type: "plain_text",
+        text: `${suggestedMatch.project_name} (${suggestedMatch.client_name || "no client"})`.slice(0, 75),
+      },
+      value: `${suggestedMatch.project_id}:${taskId}`,
+    });
+  }
+
+  // All other active projects
+  for (const p of activeProjects) {
+    if (suggestedMatch?.project_id === p.project_id) continue;
+    const firstTask = p.tasks[0];
+    const taskId = firstTask?.task_id || 0;
+    const label = p.client_name
+      ? `${p.name} (${p.client_name})`
+      : p.name;
+    options.push({
+      text: { type: "plain_text", text: label.slice(0, 75) },
+      value: `${p.project_id}:${taskId}`,
+    });
+    if (options.length >= 99) break; // Slack max 100 options
+  }
+
+  // "Skip" option
+  options.push({
+    text: { type: "plain_text", text: "Skip this event" },
+    value: "skip",
+  });
+
+  return options;
+}
+
 function formatSlackBlocks(
   events: CalendarEvent[],
   written: WriteResult[],
   skipped: MatchResult[],
   matches: MatchResult[],
-  didWrite: boolean
+  didWrite: boolean,
+  activeProjects: ProjectRecord[],
+  rememberedIds: Set<string>
 ): { text: string; blocks: Record<string, unknown>[] } {
   const today = new Date().toLocaleDateString("en-GB", {
     weekday: "long",
@@ -293,7 +346,8 @@ function formatSlackBlocks(
         );
         const event = events.find((e) => match && e.id === match.event_id);
         const time = event ? timeSlot(event.start, event.end) : "";
-        return `\u2022 ${time} ${w.event_title} \u2192 ${w.project_name} (${w.confidence})`;
+        const tag = rememberedIds.has(match?.event_id || "") ? "remembered" : w.confidence;
+        return `\u2022 ${time} ${w.event_title} \u2192 ${w.project_name} (${tag})`;
       })
       .join("\n");
   } else {
@@ -303,14 +357,40 @@ function formatSlackBlocks(
         const event = events.find((e) => e.id === m.event_id);
         const time = event ? timeSlot(event.start, event.end) : "";
         const title = event?.title || m.event_id;
-        return `\u2022 ${time} ${title} \u2192 ${m.project_name} (${m.confidence})`;
+        const tag = rememberedIds.has(m.event_id) ? "remembered" : m.confidence;
+        return `\u2022 ${time} ${title} \u2192 ${m.project_name} (${tag})`;
       })
       .join("\n");
   }
 
   let body = `*I matched ${matchCount} event${matchCount === 1 ? "" : "s"} from your calendar:*\n${matchedLines}`;
 
-  if (skipped.length > 0) {
+  // Low-confidence / skipped events get dropdown blocks (built below)
+  const lowConfBlocks: Record<string, unknown>[] = [];
+  if (skipped.length > 0 && activeProjects.length > 0) {
+    body += `\n\n*Needs your input (${skipped.length}):*`;
+    for (let i = 0; i < skipped.length; i++) {
+      const s = skipped[i];
+      const event = events.find((e) => e.id === s.event_id);
+      const title = event?.title || s.event_id;
+      const time = event ? timeSlot(event.start, event.end) : "";
+      const options = buildProjectDropdownOptions(activeProjects, s);
+      lowConfBlocks.push({
+        type: "section",
+        block_id: `low_conf_${i}`,
+        text: {
+          type: "mrkdwn",
+          text: `${time} *${title}*`,
+        },
+        accessory: {
+          type: "static_select",
+          action_id: "select_project",
+          placeholder: { type: "plain_text", text: "Pick a project..." },
+          options,
+        },
+      });
+    }
+  } else if (skipped.length > 0) {
     const skippedNames = skipped
       .map((s) => {
         const event = events.find((e) => e.id === s.event_id);
@@ -350,6 +430,7 @@ function formatSlackBlocks(
         },
       },
       { type: "section", text: { type: "mrkdwn", text: body } },
+      ...lowConfBlocks,
       { type: "divider" },
       buildSummaryActionButtons(),
     ],
@@ -470,8 +551,46 @@ export async function runCopilotSummary(
     (p) => p.status === "inprogress"
   );
 
-  // 4. Run AI matcher
-  const matches = await matchEvents(events, activeProjects);
+  // 4. Check event memory for recurring meetings, then AI-match the rest
+  const memory = await loadEventMemory(slackId);
+  const rememberedIds = new Set<string>();
+  const rememberedMatches: MatchResult[] = [];
+  const unmatchedEvents: CalendarEvent[] = [];
+
+  for (const ev of events) {
+    const normalised = normaliseTitle(ev.title);
+    const mapping = normalised ? memory[normalised] : null;
+    // Verify the remembered project is still active
+    const stillActive = mapping
+      ? activeProjects.some((p) => p.project_id === mapping.project_id)
+      : false;
+
+    if (mapping && stillActive) {
+      rememberedIds.add(ev.id);
+      rememberedMatches.push({
+        event_id: ev.id,
+        project_id: mapping.project_id,
+        project_name: mapping.project_name,
+        client_name:
+          activeProjects.find((p) => p.project_id === mapping.project_id)
+            ?.client_name || null,
+        task_id: mapping.task_id,
+        task_title: mapping.task_title,
+        confidence: "high",
+        description: `${ev.title} (remembered)`,
+        is_internal: ev.isInternal,
+        reasoning: "Matched from user's event memory",
+      });
+    } else {
+      unmatchedEvents.push(ev);
+    }
+  }
+
+  const aiMatches =
+    unmatchedEvents.length > 0
+      ? await matchEvents(unmatchedEvents, activeProjects)
+      : [];
+  const matches = [...rememberedMatches, ...aiMatches];
 
   // 5. Optionally write approved drafts to Scoro
   let written: WriteResult[] = [];
@@ -497,7 +616,9 @@ export async function runCopilotSummary(
     written,
     skipped,
     matches,
-    writeToScoro
+    writeToScoro,
+    activeProjects,
+    rememberedIds
   );
   const slackPost = await postSlackMessage(channelId, {
     text: summaryText,
@@ -525,6 +646,7 @@ export async function runCopilotSummary(
       description: m.description,
       approved:
         m.confidence !== "low" && m.project_id !== null && m.task_id !== null,
+      remembered: rememberedIds.has(m.event_id),
       scoroEntryId:
         written.find(
           (w) =>
