@@ -577,6 +577,7 @@ export async function runCopilotSummary(
   options: {
     channelId?: string; // post to this channel; defaults to slackId (opens DM)
     writeToScoro?: boolean; // write drafts to Scoro; defaults to true
+    projectLookup?: { projects: ProjectRecord[] }; // pre-fetched lookup to share across users
   } = {}
 ): Promise<SummaryResult> {
   const { channelId = slackId, writeToScoro = true } = options;
@@ -621,8 +622,8 @@ export async function runCopilotSummary(
     };
   }
 
-  // 3. Load project lookup (cached in Upstash)
-  const lookup = await getProjectLookup();
+  // 3. Load project lookup (use pre-fetched if provided, otherwise fetch/cache)
+  const lookup = options.projectLookup || (await getProjectLookup());
   const activeProjects = lookup.projects.filter(
     (p) => p.status === "inprogress"
   );

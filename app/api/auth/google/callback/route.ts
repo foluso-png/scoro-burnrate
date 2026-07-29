@@ -3,45 +3,36 @@ import { saveTokens, UserTokenRecord } from "@/lib/google-auth";
 
 /**
  * Resolve the Slack member ID for a Google email address.
- * Uses Slack's users.lookupByEmail API.
+ * Uses Slack's users.lookupByEmail API (requires users:read.email scope).
  *
- * TEMP FALLBACK: If the lookup fails (e.g. bot lacks users:read.email scope),
- * falls back to the SLACK_USER_ID env var. Remove this once the Slack app has
- * the users:read.email scope enabled in production.
+ * If the lookup fails, we throw rather than silently storing tokens under
+ * the wrong user, which would send someone else's timesheet to them.
  */
 async function resolveSlackId(email: string): Promise<string> {
   const slackToken = process.env.SLACK_BOT_TOKEN;
-
-  if (slackToken) {
-    try {
-      const res = await fetch(
-        `https://slack.com/api/users.lookupByEmail?email=${encodeURIComponent(email)}`,
-        { headers: { Authorization: `Bearer ${slackToken}` } }
-      );
-      const data = await res.json();
-      if (data.ok && data.user?.id) {
-        return data.user.id as string;
-      }
-      console.warn(
-        `Slack lookupByEmail failed for ${email}: ${data.error || "unknown error"}`
-      );
-    } catch (err) {
-      console.warn(
-        `Slack lookupByEmail threw for ${email}:`,
-        err instanceof Error ? err.message : err
-      );
-    }
-  }
-
-  // TEMP: fall back to env var until users:read.email scope is live
-  const fallback = process.env.SLACK_USER_ID;
-  if (!fallback) {
+  if (!slackToken) {
     throw new Error(
-      "Could not resolve Slack ID: lookupByEmail failed and SLACK_USER_ID is not set"
+      "SLACK_BOT_TOKEN is not configured. Please contact Foluso."
     );
   }
-  console.warn(`Using SLACK_USER_ID fallback (${fallback}) for ${email}`);
-  return fallback;
+
+  const res = await fetch(
+    `https://slack.com/api/users.lookupByEmail?email=${encodeURIComponent(email)}`,
+    { headers: { Authorization: `Bearer ${slackToken}` } }
+  );
+  const data = await res.json();
+
+  if (data.ok && data.user?.id) {
+    return data.user.id as string;
+  }
+
+  const slackError = data.error || "unknown error";
+  console.error(
+    `Slack lookupByEmail failed for ${email}: ${slackError}`
+  );
+  throw new Error(
+    `Could not find your Slack account (${email}). Please contact Foluso so he can sort it out.`
+  );
 }
 
 export async function GET(request: NextRequest) {
