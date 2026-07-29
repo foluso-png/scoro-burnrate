@@ -8,6 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { runCopilotSummary, SummaryResult } from "@/lib/copilot-summary";
 import { listRegisteredUsers } from "@/lib/google-auth";
 import { getProjectLookup } from "@/lib/matcher";
+import { saveLastRun } from "@/lib/last-run";
 
 // ---------------------------------------------------------------------------
 // Per-user result shape for the JSON response
@@ -55,6 +56,12 @@ export async function GET(request: NextRequest) {
         projectLookup,
       });
 
+      await saveLastRun(slackId, {
+        timestamp: new Date().toISOString(),
+        status: "ok",
+        entryCount: result.matched,
+      });
+
       results.push({
         slackId,
         status: "ok",
@@ -67,6 +74,14 @@ export async function GET(request: NextRequest) {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`run-copilot: user ${slackId} failed:`, message);
+
+      await saveLastRun(slackId, {
+        timestamp: new Date().toISOString(),
+        status: "error",
+        entryCount: 0,
+        error: message,
+      }).catch(() => {}); // don't let logging fail the loop
+
       results.push({
         slackId,
         status: "error",

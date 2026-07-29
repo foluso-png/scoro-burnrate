@@ -110,6 +110,8 @@ export async function GET(request: NextRequest) {
 
     const url = new URL("/connect", request.url);
     url.searchParams.set("status", "success");
+    url.searchParams.set("email", email);
+    url.searchParams.set("name", name);
 
     const response = NextResponse.redirect(url);
     response.cookies.set("oauth_state", "", {
