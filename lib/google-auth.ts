@@ -88,6 +88,32 @@ export async function deleteTokens(slackId: string) {
   }
 }
 
+/**
+ * List all registered Slack user IDs by scanning for tokens:* keys in Upstash.
+ * Returns an empty array if using local file storage.
+ */
+export async function listRegisteredUsers(): Promise<string[]> {
+  if (!useUpstash) return [];
+
+  const redis = await getRedis();
+  const ids: string[] = [];
+  let cursor = 0;
+
+  do {
+    const [nextCursor, keys] = await redis.scan(cursor, {
+      match: "tokens:*",
+      count: 100,
+    });
+    cursor = typeof nextCursor === "string" ? parseInt(nextCursor, 10) : nextCursor;
+    for (const key of keys) {
+      const id = (key as string).replace("tokens:", "");
+      if (id) ids.push(id);
+    }
+  } while (cursor !== 0);
+
+  return ids;
+}
+
 export async function getAccessToken(slackId: string): Promise<string> {
   const record = await loadTokens(slackId);
   if (!record || !record.googleTokens.refresh_token) {
