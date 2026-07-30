@@ -9,13 +9,15 @@ import { runCopilotSummary, SummaryResult } from "@/lib/copilot-summary";
 import { listRegisteredUsers } from "@/lib/google-auth";
 import { getProjectLookup } from "@/lib/matcher";
 import { saveLastRun } from "@/lib/last-run";
+import { loadUserPrefs } from "@/lib/user-prefs";
 
 // ---------------------------------------------------------------------------
 // Per-user result shape for the JSON response
 // ---------------------------------------------------------------------------
 interface UserRunResult {
   slackId: string;
-  status: "ok" | "error";
+  status: "ok" | "skipped" | "error";
+  reason?: string;
   eventCount?: number;
   matched?: number;
   failed?: number;
@@ -25,7 +27,7 @@ interface UserRunResult {
 }
 
 // ---------------------------------------------------------------------------
-// GET handler — triggered by Vercel Cron
+// GET handler — triggered by Vercel Cron (hourly, Mon-Fri)
 // ---------------------------------------------------------------------------
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
@@ -33,23 +35,59 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
   }
 
+  // Current hour in Europe/London
+  const nowLondon = new Date(
+    new Date().toLocaleString("en-US", { timeZone: "Europe/London" })
+  );
+  const currentHour = nowLondon.getHours();
+
   // 1. Discover all registered users
   const userIds = await listRegisteredUsers();
 
   if (userIds.length === 0) {
     return NextResponse.json({
       message: "No registered users found",
+      hour: currentHour,
       users: [],
     });
   }
 
-  // 2. Fetch project lookup once for all users
-  const projectLookup = await getProjectLookup();
-
-  // 3. Process each user independently — one failure must not block others
-  const results: UserRunResult[] = [];
+  // 2. Filter to users whose delivery hour matches now and who aren't paused
+  const eligible: string[] = [];
+  const skippedResults: UserRunResult[] = [];
 
   for (const slackId of userIds) {
+    const prefs = await loadUserPrefs(slackId);
+    if (prefs.paused) {
+      skippedResults.push({ slackId, status: "skipped", reason: "paused" });
+      continue;
+    }
+    if (prefs.deliveryHour !== currentHour) {
+      skippedResults.push({
+        slackId,
+        status: "skipped",
+        reason: `hour mismatch (wants ${prefs.deliveryHour}, now ${currentHour})`,
+      });
+      continue;
+    }
+    eligible.push(slackId);
+  }
+
+  if (eligible.length === 0) {
+    return NextResponse.json({
+      message: `No users due at hour ${currentHour}`,
+      hour: currentHour,
+      users: skippedResults,
+    });
+  }
+
+  // 3. Fetch project lookup once for all users
+  const projectLookup = await getProjectLookup();
+
+  // 4. Process each eligible user independently
+  const results: UserRunResult[] = [...skippedResults];
+
+  for (const slackId of eligible) {
     try {
       const result: SummaryResult = await runCopilotSummary(slackId, {
         writeToScoro: true,
@@ -94,7 +132,8 @@ export async function GET(request: NextRequest) {
   const errored = results.filter((r) => r.status === "error").length;
 
   return NextResponse.json({
-    message: `Processed ${userIds.length} user${userIds.length === 1 ? "" : "s"}: ${succeeded} ok, ${errored} failed`,
+    message: `Hour ${currentHour}: ${eligible.length} eligible, ${succeeded} ok, ${errored} failed`,
+    hour: currentHour,
     users: results,
   });
 }

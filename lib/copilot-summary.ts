@@ -19,6 +19,7 @@ import {
   normaliseTitle,
   EventMemory,
 } from "./event-memory";
+import { pickSignOff } from "./sign-off";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -700,6 +701,18 @@ export async function runCopilotSummary(
     activeProjects,
     rememberedIds
   );
+
+  // 6b. Append a rotating sign-off message
+  const totalMinutes = events.reduce((sum, e) => {
+    const ms = new Date(e.end).getTime() - new Date(e.start).getTime();
+    return sum + Math.round(ms / 60000);
+  }, 0);
+  const signOff = await pickSignOff(slackId, totalMinutes);
+  blocks.push({
+    type: "context",
+    elements: [{ type: "mrkdwn", text: `_${signOff}_` }],
+  });
+
   const slackPost = await postSlackMessage(channelId, {
     text: summaryText,
     blocks,
