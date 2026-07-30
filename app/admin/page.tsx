@@ -1,11 +1,13 @@
 import { listRegisteredUsers, loadTokens } from "@/lib/google-auth";
 import { loadLastRun, LastRunRecord } from "@/lib/last-run";
+import { loadUserPrefs, UserPrefs } from "@/lib/user-prefs";
 
 interface UserRow {
   slackId: string;
   name: string | null;
   email: string | null;
   lastRun: LastRunRecord | null;
+  prefs: UserPrefs;
 }
 
 export const dynamic = "force-dynamic";
@@ -15,20 +17,21 @@ export default async function AdminPage() {
 
   const users: UserRow[] = await Promise.all(
     slackIds.map(async (slackId) => {
-      const [tokens, lastRun] = await Promise.all([
+      const [tokens, lastRun, prefs] = await Promise.all([
         loadTokens(slackId),
         loadLastRun(slackId),
+        loadUserPrefs(slackId),
       ]);
       return {
         slackId,
         name: tokens?.name ?? null,
         email: tokens?.email ?? null,
         lastRun,
+        prefs,
       };
     })
   );
 
-  // Sort alphabetically by name, falling back to email
   users.sort((a, b) =>
     (a.name || a.email || a.slackId).localeCompare(
       b.name || b.email || b.slackId
@@ -37,7 +40,7 @@ export default async function AdminPage() {
 
   return (
     <div className="min-h-screen bg-gray-50 p-8">
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-5xl mx-auto">
         <h1 className="text-2xl font-bold text-gray-900 mb-1">
           Timesheet Co-pilot — Admin
         </h1>
@@ -55,6 +58,7 @@ export default async function AdminPage() {
                   <th className="px-4 py-3">Name</th>
                   <th className="px-4 py-3">Email</th>
                   <th className="px-4 py-3">Slack ID</th>
+                  <th className="px-4 py-3">Delivery</th>
                   <th className="px-4 py-3">Last run</th>
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">Entries</th>
@@ -71,6 +75,15 @@ export default async function AdminPage() {
                     </td>
                     <td className="px-4 py-3 text-gray-500 font-mono text-xs">
                       {u.slackId}
+                    </td>
+                    <td className="px-4 py-3 text-gray-600">
+                      {u.prefs.paused ? (
+                        <span className="text-amber-700 bg-amber-50 px-2 py-0.5 rounded text-xs font-medium">
+                          Paused
+                        </span>
+                      ) : (
+                        formatHour(u.prefs.deliveryHour)
+                      )}
                     </td>
                     <td className="px-4 py-3 text-gray-600">
                       {u.lastRun
@@ -115,4 +128,10 @@ function formatTimestamp(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatHour(hour: number): string {
+  const h = hour % 12 || 12;
+  const ampm = hour < 12 ? "am" : "pm";
+  return `${h}${ampm}`;
 }

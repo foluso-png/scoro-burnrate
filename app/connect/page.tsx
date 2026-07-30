@@ -199,6 +199,12 @@ export default async function ConnectPage({
                 <span style={{ color: "#8A7968" }} className="mt-0.5 shrink-0">
                   &bull;
                 </span>
+                You can pause notifications any time by messaging the bot.
+              </li>
+              <li className="flex items-start gap-2">
+                <span style={{ color: "#8A7968" }} className="mt-0.5 shrink-0">
+                  &bull;
+                </span>
                 You can disconnect at any time.
               </li>
             </ul>

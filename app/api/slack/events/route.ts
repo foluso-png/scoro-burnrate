@@ -19,6 +19,7 @@ import {
 import { runCopilotSummary } from "@/lib/copilot-summary";
 import { finaliseAndWrite } from "@/lib/scoro-writer";
 import { saveEventMapping } from "@/lib/event-memory";
+import { loadUserPrefs, saveUserPrefs } from "@/lib/user-prefs";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -468,6 +469,86 @@ async function processFixCorrection(
 }
 
 // ---------------------------------------------------------------------------
+// Pause / resume notifications
+// ---------------------------------------------------------------------------
+const PAUSE_PATTERN =
+  /\b(stop|pause|disable|turn off|mute)\b.*\b(notification|summary|summaries|copilot|co-pilot|bot|messages?)\b/i;
+const RESUME_PATTERN =
+  /\b(start|resume|enable|turn on|unmute)\b.*\b(notification|summary|summaries|copilot|co-pilot|bot|messages?)\b/i;
+
+async function handlePauseResume(
+  userId: string,
+  channelId: string,
+  text: string
+): Promise<boolean> {
+  if (PAUSE_PATTERN.test(text)) {
+    const prefs = await loadUserPrefs(userId);
+    prefs.paused = true;
+    await saveUserPrefs(userId, prefs);
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: "Notifications paused. Message me \"start notifications\" whenever you want them back." } }],
+      "Notifications paused"
+    );
+    return true;
+  }
+  if (RESUME_PATTERN.test(text)) {
+    const prefs = await loadUserPrefs(userId);
+    prefs.paused = false;
+    await saveUserPrefs(userId, prefs);
+    const hour = prefs.deliveryHour;
+    const timeStr = `${hour % 12 || 12}${hour < 12 ? "am" : "pm"}`;
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: `Notifications resumed. You'll get your summary at ${timeStr} each weekday.` } }],
+      "Notifications resumed"
+    );
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Delivery time configuration
+// ---------------------------------------------------------------------------
+const TIME_PATTERN =
+  /\b(?:send|deliver|schedule|set)\b.*\b(?:summary|timesheet|notification)\b.*?\b(\d{1,2})\s*([ap]m)\b/i;
+const TIME_PATTERN_ALT =
+  /\b(?:send|deliver|schedule|set)\b.*\bat\s+(\d{1,2})\s*([ap]m)\b/i;
+
+function parseDeliveryHour(text: string): number | null {
+  const match = TIME_PATTERN.exec(text) || TIME_PATTERN_ALT.exec(text);
+  if (!match) return null;
+  let hour = parseInt(match[1], 10);
+  const ampm = match[2].toLowerCase();
+  if (hour < 1 || hour > 12) return null;
+  if (ampm === "am" && hour === 12) hour = 0;
+  else if (ampm === "pm" && hour !== 12) hour += 12;
+  return hour;
+}
+
+async function handleDeliveryTime(
+  userId: string,
+  channelId: string,
+  text: string
+): Promise<boolean> {
+  const hour = parseDeliveryHour(text);
+  if (hour === null) return false;
+
+  const prefs = await loadUserPrefs(userId);
+  prefs.deliveryHour = hour;
+  await saveUserPrefs(userId, prefs);
+
+  const timeStr = `${hour % 12 || 12}${hour < 12 ? "am" : "pm"}`;
+  await postSlackReply(
+    channelId,
+    [{ type: "section", text: { type: "mrkdwn", text: `Got it. Your daily summary will arrive at *${timeStr}* (UK time) each weekday.` } }],
+    `Delivery time set to ${timeStr}`
+  );
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Loading indicator
 // ---------------------------------------------------------------------------
 async function postThinking(channelId: string): Promise<void> {
@@ -640,6 +721,10 @@ export async function POST(request: NextRequest) {
   // Acknowledge immediately, process in background
   after(async () => {
     try {
+      // Check for pause/resume or delivery time before anything else
+      if (await handlePauseResume(userId, channelId, text)) return;
+      if (await handleDeliveryTime(userId, channelId, text)) return;
+
       // If the message doesn't look like a time entry, check if it's
       // an end-of-day intent (via AI). This runs before conversation
       // state so "wrap up" / "done" works even mid-session.
