@@ -20,6 +20,7 @@ import {
   EventMemory,
 } from "./event-memory";
 import { pickSignOff } from "./sign-off";
+import { loadUserPrefs } from "./user-prefs";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -81,19 +82,25 @@ function isInternalEmail(email: string): boolean {
   );
 }
 
-async function fetchTodayEvents(
+async function fetchDayEvents(
   accessToken: string,
-  cutoff: Date
+  cutoff: Date,
+  targetDate?: Date
 ): Promise<CalendarEvent[]> {
+  const dayRef = targetDate || cutoff;
   const startOfDay = new Date(
-    cutoff.getFullYear(),
-    cutoff.getMonth(),
-    cutoff.getDate()
+    dayRef.getFullYear(),
+    dayRef.getMonth(),
+    dayRef.getDate()
   );
+  // For past dates, fetch the full day; for today, only up to now
+  const endBound = targetDate
+    ? new Date(startOfDay.getTime() + 86400000) // start of next day
+    : cutoff;
 
   const params = new URLSearchParams({
     timeMin: startOfDay.toISOString(),
-    timeMax: cutoff.toISOString(),
+    timeMax: endBound.toISOString(),
     singleEvents: "true",
     orderBy: "startTime",
   });
@@ -259,29 +266,28 @@ function buildProjectDropdownOptions(
     value: string;
   }> = [];
 
-  // AI suggestion first (if it has a project)
-  if (suggestedMatch?.project_id) {
-    const taskId = suggestedMatch.task_id || 0;
+  // AI suggestion first (if it has a project with a valid task)
+  if (suggestedMatch?.project_id && suggestedMatch.task_id) {
     options.push({
       text: {
         type: "plain_text",
         text: `${suggestedMatch.project_name} (${suggestedMatch.client_name || "no client"})`.slice(0, 75),
       },
-      value: `${suggestedMatch.project_id}:${taskId}`,
+      value: `${suggestedMatch.project_id}:${suggestedMatch.task_id}`,
     });
   }
 
-  // All other active projects
+  // All other active projects (only those with at least one task)
   for (const p of activeProjects) {
     if (suggestedMatch?.project_id === p.project_id) continue;
+    if (p.tasks.length === 0) continue;
     const firstTask = p.tasks[0];
-    const taskId = firstTask?.task_id || 0;
     const label = p.client_name
       ? `${p.name} (${p.client_name})`
       : p.name;
     options.push({
       text: { type: "plain_text", text: label.slice(0, 75) },
-      value: `${p.project_id}:${taskId}`,
+      value: `${p.project_id}:${firstTask.task_id}`,
     });
     if (options.length >= 99) break; // Slack max 100 options
   }
@@ -323,9 +329,10 @@ function formatSlackBlocks(
   matches: MatchResult[],
   didWrite: boolean,
   activeProjects: ProjectRecord[],
-  rememberedIds: Set<string>
+  rememberedIds: Set<string>,
+  dateLabel?: string
 ): { text: string; blocks: Record<string, unknown>[] } {
-  const today = new Date().toLocaleDateString("en-GB", {
+  const today = dateLabel || new Date().toLocaleDateString("en-GB", {
     weekday: "long",
     day: "numeric",
     month: "long",
@@ -571,6 +578,50 @@ async function postSlackMessage(
 }
 
 // ---------------------------------------------------------------------------
+// Scoro date checks (for day catch-up feature)
+// ---------------------------------------------------------------------------
+export async function checkScoroEntriesForDate(
+  dateStr: string
+): Promise<{ hasEntries: boolean; count: number; error: boolean }> {
+  try {
+    const res = await scoroPost<Array<Record<string, unknown>>>("/timeEntries/list", {
+      filter: {
+        user_id: SCORO_USER_ID,
+        start_date: dateStr,
+        end_date: dateStr,
+      },
+      per_page: 1,
+    });
+    const entries = Array.isArray(res.data) ? res.data : [];
+    return { hasEntries: entries.length > 0, count: entries.length, error: false };
+  } catch {
+    // Fail closed — if we can't verify, block the flow to avoid duplicates
+    return { hasEntries: false, count: 0, error: true };
+  }
+}
+
+export async function checkWeekSubmitted(
+  dateStr: string
+): Promise<{ submitted: boolean; error: boolean }> {
+  try {
+    const res = await scoroPost<Array<Record<string, unknown>>>("/timeSheets/list", {
+      filter: {
+        user_id: SCORO_USER_ID,
+        date: dateStr,
+        status: "submitted",
+      },
+      per_page: 1,
+    });
+    const sheets = Array.isArray(res.data) ? res.data : [];
+    return { submitted: sheets.length > 0, error: false };
+  } catch {
+    // Fail closed — if we can't verify, block the flow to avoid duplicates
+    console.warn("Could not check timesheet submission status");
+    return { submitted: false, error: true };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main summary pipeline
 // ---------------------------------------------------------------------------
 export async function runCopilotSummary(
@@ -579,6 +630,7 @@ export async function runCopilotSummary(
     channelId?: string; // post to this channel; defaults to slackId (opens DM)
     writeToScoro?: boolean; // write drafts to Scoro; defaults to true
     projectLookup?: { projects: ProjectRecord[] }; // pre-fetched lookup to share across users
+    targetDate?: Date; // run for a specific past date instead of today
   } = {}
 ): Promise<SummaryResult> {
   const { channelId = slackId, writeToScoro = true } = options;
@@ -587,17 +639,16 @@ export async function runCopilotSummary(
   // 1. Get Google access token
   const accessToken = await getAccessToken(slackId);
 
-  // 2. Fetch today's calendar events (only those that have started by now)
-  const events = await fetchTodayEvents(accessToken, cutoff);
+  // 2. Fetch calendar events (for targetDate or today)
+  const events = await fetchDayEvents(accessToken, cutoff, options.targetDate);
+
+  const displayDate = (options.targetDate || new Date()).toLocaleDateString(
+    "en-GB",
+    { weekday: "long", day: "numeric", month: "long", year: "numeric" }
+  );
 
   if (events.length === 0) {
-    const today = new Date().toLocaleDateString("en-GB", {
-      weekday: "long",
-      day: "numeric",
-      month: "long",
-      year: "numeric",
-    });
-    const text = `\ud83d\udc4b Here's your end-of-day summary \u2014 ${today}\n\nNo events on the calendar today. You can still add time below if you need to.`;
+    const text = `\ud83d\udc4b Here's your end-of-day summary \u2014 ${displayDate}\n\nNo events on the calendar for ${options.targetDate ? "that day" : "today"}. You can still add time below if you need to.`;
     const slackPost = await postSlackMessage(channelId, {
       text,
       blocks: [
@@ -672,6 +723,25 @@ export async function runCopilotSummary(
       : [];
   const matches = [...rememberedMatches, ...aiMatches];
 
+  // 4b. Apply user's default role to task-uncertain matches
+  const prefs = await loadUserPrefs(slackId);
+  if (prefs.defaultRole) {
+    const roleLower = prefs.defaultRole.toLowerCase();
+    for (const m of matches) {
+      if (m.task_confident || m.project_id === null) continue;
+      const project = activeProjects.find((p) => p.project_id === m.project_id);
+      if (!project) continue;
+      const roleTask = project.tasks.find(
+        (t) => t.title.toLowerCase() === roleLower
+      );
+      if (roleTask) {
+        m.task_id = roleTask.task_id;
+        m.task_title = roleTask.title;
+        m.task_confident = true;
+      }
+    }
+  }
+
   // 5. Optionally write approved drafts to Scoro
   let written: WriteResult[] = [];
   let skipped: MatchResult[] = [];
@@ -699,7 +769,8 @@ export async function runCopilotSummary(
     matches,
     writeToScoro,
     activeProjects,
-    rememberedIds
+    rememberedIds,
+    displayDate
   );
 
   // 6b. Append a rotating sign-off message

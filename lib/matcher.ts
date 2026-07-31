@@ -154,6 +154,19 @@ async function fetchAllProjects(): Promise<ScoroProject[]> {
   return allProjects;
 }
 
+/**
+ * Scoro sometimes returns task names as "Role - Role" when the activity type
+ * and event name are identical. Strip the duplicate half.
+ */
+function deduplicateTaskTitle(name: string): string {
+  const idx = name.indexOf(" - ");
+  if (idx === -1) return name;
+  const left = name.slice(0, idx).trim();
+  const right = name.slice(idx + 3).trim();
+  if (left.toLowerCase() === right.toLowerCase()) return left;
+  return name;
+}
+
 async function fetchProjectTasks(projectId: number): Promise<TaskRecord[]> {
   const allTasks: ScoroTask[] = [];
   let page = 1;
@@ -174,7 +187,9 @@ async function fetchProjectTasks(projectId: number): Promise<TaskRecord[]> {
 
   const seen = new Map<string, TaskRecord>();
   for (const t of active) {
-    const name = t.event_name || "Untitled";
+    const rawName = t.event_name || "Untitled";
+    // Scoro sometimes returns "Role - Role" when activity type matches task name
+    const name = deduplicateTaskTitle(rawName);
     if (!seen.has(name)) {
       seen.set(name, {
         task_id: t.event_id,

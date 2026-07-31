@@ -112,6 +112,7 @@ export async function GET(request: NextRequest) {
     url.searchParams.set("status", "success");
     url.searchParams.set("email", email);
     url.searchParams.set("name", name);
+    url.searchParams.set("sid", slackId);
 
     const response = NextResponse.redirect(url);
     response.cookies.set("oauth_state", "", {
