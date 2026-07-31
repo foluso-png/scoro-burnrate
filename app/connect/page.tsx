@@ -20,6 +20,8 @@
  * -----------------------------------------------------------------------
  */}
 
+import RoleSelector from "./RoleSelector";
+
 export default async function ConnectPage({
   searchParams,
 }: {
@@ -28,6 +30,7 @@ export default async function ConnectPage({
     message?: string;
     email?: string;
     name?: string;
+    sid?: string;
   }>;
 }) {
   const params = await searchParams;
@@ -70,22 +73,35 @@ export default async function ConnectPage({
 
           {/* Success state */}
           {isConnected && (
-            <div
-              className="mb-8 mx-auto max-w-sm rounded-lg px-5 py-4 text-left"
-              style={{
-                backgroundColor: "rgba(91,154,95,0.12)",
-                border: "1px solid rgba(91,154,95,0.3)",
-              }}
-            >
-              <p className="font-medium mb-1" style={{ color: "#8FD694" }}>
-                You&apos;re connected
-                {params.email ? ` as ${params.email}` : ""}.
-              </p>
-              <p className="text-sm" style={{ color: "#C9B8A8" }}>
-                You&apos;ll get your first summary this afternoon. If you
-                can&apos;t wait, message the bot &quot;wrap up my day&quot; in
-                Slack.
-              </p>
+            <div className="mb-8 mx-auto max-w-sm space-y-4">
+              <div
+                className="rounded-lg px-5 py-4 text-left"
+                style={{
+                  backgroundColor: "rgba(91,154,95,0.12)",
+                  border: "1px solid rgba(91,154,95,0.3)",
+                }}
+              >
+                <p className="font-medium mb-1" style={{ color: "#8FD694" }}>
+                  You&apos;re connected
+                  {params.email ? ` as ${params.email}` : ""}.
+                </p>
+                <p className="text-sm" style={{ color: "#C9B8A8" }}>
+                  You&apos;ll get your first summary this afternoon. If you
+                  can&apos;t wait, message the bot &quot;wrap up my day&quot; in
+                  Slack.
+                </p>
+              </div>
+              {params.sid && (
+                <div
+                  className="rounded-lg px-5 py-4"
+                  style={{
+                    backgroundColor: "#2A1D14",
+                    border: "1px solid #3D2B1E",
+                  }}
+                >
+                  <RoleSelector slackId={params.sid} />
+                </div>
+              )}
             </div>
           )}
 

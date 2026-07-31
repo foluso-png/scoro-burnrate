@@ -11,11 +11,14 @@ export interface UserPrefs {
   deliveryHour: number;
   /** If true, skip this user in the daily cron loop. */
   paused: boolean;
+  /** Default role/task title for Scoro. Used to pre-fill task selection when a project has a matching task. */
+  defaultRole: string | null;
 }
 
 const DEFAULT_PREFS: UserPrefs = {
   deliveryHour: 17,
   paused: false,
+  defaultRole: null,
 };
 
 function key(slackId: string): string {

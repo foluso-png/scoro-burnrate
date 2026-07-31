@@ -16,7 +16,11 @@ import {
   splitAndMatchFreeText,
   classifyEndOfDayIntent,
 } from "@/lib/matcher";
-import { runCopilotSummary } from "@/lib/copilot-summary";
+import {
+  runCopilotSummary,
+  checkScoroEntriesForDate,
+  checkWeekSubmitted,
+} from "@/lib/copilot-summary";
 import { finaliseAndWrite } from "@/lib/scoro-writer";
 import { saveEventMapping } from "@/lib/event-memory";
 import { loadUserPrefs, saveUserPrefs } from "@/lib/user-prefs";
@@ -357,11 +361,50 @@ async function handleFixText(
   await processFixCorrection(convo, channelId, text);
 }
 
+/**
+ * Detect if the user is trying to split an entry across multiple projects.
+ * Patterns: "split X to A and Y to B", "15 min on A and 45 min on B",
+ * multiple duration mentions, or the word "split".
+ */
+function looksLikeMultiProjectSplit(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (/\bsplit\b/.test(lower)) return true;
+  // Count distinct duration mentions
+  const durations = lower.match(
+    /\d+\s*(h(ours?|rs?|r)?|m(ins?|inutes?)?)\b/gi
+  );
+  if (durations && durations.length >= 2) {
+    // Check for "and" or "," between them, suggesting different destinations
+    if (/\d+\s*(h|m|hours?|mins?|minutes?)\b.*\b(and|,)\b.*\d+\s*(h|m|hours?|mins?|minutes?)\b/i.test(lower)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function processFixCorrection(
   convo: Awaited<ReturnType<typeof loadConversation>> & object,
   channelId: string,
   text: string
 ): Promise<void> {
+  // Detect multi-project split attempts and warn
+  if (looksLikeMultiProjectSplit(text)) {
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "I can't split an entry across multiple projects via *Fix an entry*. To log time against different projects, use *Add time* instead and add each piece separately.",
+          },
+        },
+      ],
+      "Can't split across projects"
+    );
+    return;
+  }
+
   const idx = convo.fixingDraftIndex!;
   const draft = convo.drafts[idx];
 
@@ -549,6 +592,138 @@ async function handleDeliveryTime(
 }
 
 // ---------------------------------------------------------------------------
+// Day catch-up — "go back to Monday", "catch up on Tuesday", etc.
+// ---------------------------------------------------------------------------
+const DAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+const CATCHUP_PATTERN =
+  /\b(?:go back to|catch up on|do|run|show me|redo)\b.*?\b(monday|tuesday|wednesday|thursday|friday)\b/i;
+
+function parseCatchUpDay(text: string): Date | null {
+  const match = CATCHUP_PATTERN.exec(text);
+  if (!match) return null;
+
+  const dayName = match[1].toLowerCase();
+  const targetDow = DAY_NAMES.indexOf(dayName);
+  if (targetDow === -1) return null;
+
+  // Find that day within the current Mon-Sun week
+  const now = new Date();
+  const currentDow = now.getDay(); // 0=Sun, 1=Mon, ...
+  const todayDow = currentDow === 0 ? 7 : currentDow; // shift to Mon=1..Sun=7
+  const targetShifted = targetDow === 0 ? 7 : targetDow;
+
+  // Only allow past days within the same Mon-Sun week
+  if (targetShifted >= todayDow) return null; // can't catch up on today or future
+
+  const diff = todayDow - targetShifted;
+  const target = new Date(now);
+  target.setDate(target.getDate() - diff);
+  target.setHours(0, 0, 0, 0);
+  return target;
+}
+
+function formatDateStr(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+async function handleCatchUp(
+  userId: string,
+  channelId: string,
+  targetDate: Date
+): Promise<void> {
+  const dayLabel = targetDate.toLocaleDateString("en-GB", {
+    weekday: "long",
+  });
+  const dateStr = formatDateStr(targetDate);
+
+  const SCORO_CHECK_FAILED_MSG =
+    "Couldn't verify Scoro for that date, so I won't risk a duplicate. Please check manually.";
+
+  // Check if entries already exist for that day
+  const entriesCheck = await checkScoroEntriesForDate(dateStr);
+  if (entriesCheck.error) {
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: SCORO_CHECK_FAILED_MSG } }],
+      "Scoro check failed"
+    );
+    return;
+  }
+  if (entriesCheck.hasEntries) {
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `You've already got entries logged for ${dayLabel}. I can't touch those; check Scoro directly if something's wrong there.`,
+          },
+        },
+      ],
+      `Entries already exist for ${dayLabel}`
+    );
+    return;
+  }
+
+  // Check if the week has been submitted
+  const weekCheck = await checkWeekSubmitted(dateStr);
+  if (weekCheck.error) {
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: SCORO_CHECK_FAILED_MSG } }],
+      "Scoro check failed"
+    );
+    return;
+  }
+  if (weekCheck.submitted) {
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "This week's already submitted in Scoro, so I can't add anything to it.",
+          },
+        },
+      ],
+      "Week already submitted"
+    );
+    return;
+  }
+
+  // All clear — run the summary for that date
+  await postThinking(channelId);
+  try {
+    await runCopilotSummary(userId, {
+      channelId,
+      writeToScoro: false,
+      targetDate,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("Catch-up summary error:", msg);
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `Something went wrong running the summary for ${dayLabel}: ${msg}`,
+          },
+        },
+      ],
+      "Catch-up error"
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Loading indicator
 // ---------------------------------------------------------------------------
 async function postThinking(channelId: string): Promise<void> {
@@ -724,6 +899,13 @@ export async function POST(request: NextRequest) {
       // Check for pause/resume or delivery time before anything else
       if (await handlePauseResume(userId, channelId, text)) return;
       if (await handleDeliveryTime(userId, channelId, text)) return;
+
+      // Check for day catch-up ("go back to Monday", etc.)
+      const catchUpDate = parseCatchUpDay(text);
+      if (catchUpDate) {
+        await handleCatchUp(userId, channelId, catchUpDate);
+        return;
+      }
 
       // If the message doesn't look like a time entry, check if it's
       // an end-of-day intent (via AI). This runs before conversation
