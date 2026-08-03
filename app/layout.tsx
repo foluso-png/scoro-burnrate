@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Scoro Burn Rate Dashboard",
-  description: "Track project burn rates from Scoro in real time",
+  title: "Timesheet Co-pilot",
+  description: "Connect your calendar once. Get a draft timesheet in Slack every evening, ready to review and submit.",
 };
 
 export default function RootLayout({
