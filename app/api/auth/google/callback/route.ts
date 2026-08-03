@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { saveTokens, UserTokenRecord } from "@/lib/google-auth";
+import { loadUserPrefs, saveUserPrefs } from "@/lib/user-prefs";
+import { scoroPost } from "@/lib/matcher";
 
 /**
  * Resolve the Slack member ID for a Google email address.
@@ -33,6 +35,36 @@ async function resolveSlackId(email: string): Promise<string> {
   throw new Error(
     `Could not find your Slack account (${email}). Please contact Foluso so he can sort it out.`
   );
+}
+
+/**
+ * Look up a Scoro user ID by email address.
+ * Returns the numeric ID if found, or null if no match.
+ */
+async function resolveScoroUserId(email: string): Promise<number | null> {
+  try {
+    interface ScoroUserRecord {
+      id: number;
+      email?: string;
+      username?: string;
+      [key: string]: unknown;
+    }
+    const res = await scoroPost<ScoroUserRecord[]>("/users/list", {
+      per_page: 500,
+      page: 1,
+    });
+    const users = Array.isArray(res.data) ? res.data : [];
+    const emailLower = email.toLowerCase();
+    const match = users.find(
+      (u) =>
+        (u.email && u.email.toLowerCase() === emailLower) ||
+        (u.username && u.username.toLowerCase() === emailLower)
+    );
+    return match ? match.id : null;
+  } catch (err) {
+    console.error("Failed to resolve Scoro user ID:", err);
+    return null;
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -107,6 +139,14 @@ export async function GET(request: NextRequest) {
       name,
     };
     await saveTokens(slackId, record);
+
+    // Resolve and store Scoro user ID
+    const scoroUserId = await resolveScoroUserId(email);
+    if (scoroUserId) {
+      const prefs = await loadUserPrefs(slackId);
+      prefs.scoroUserId = scoroUserId;
+      await saveUserPrefs(slackId, prefs);
+    }
 
     const url = new URL("/connect", request.url);
     url.searchParams.set("status", "success");

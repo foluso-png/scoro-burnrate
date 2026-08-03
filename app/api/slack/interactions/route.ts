@@ -14,6 +14,7 @@ import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
 import { runCopilotSummary } from "@/lib/copilot-summary";
 import { saveEventMapping } from "@/lib/event-memory";
 import { getProjectLookup } from "@/lib/matcher";
+import { loadUserPrefs } from "@/lib/user-prefs";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -166,15 +167,25 @@ async function handleLooksRight(
     return;
   }
 
+  // Validate Scoro user ID before writing
+  const prefs = await loadUserPrefs(userId);
+  if (!prefs.scoroUserId) {
+    await postToResponseUrl(
+      responseUrl,
+      "Your Scoro user ID hasn't been set up yet. Please reconnect at /connect or ask Foluso to set it manually."
+    );
+    return;
+  }
+
   // Write all approved drafts to Scoro (the slow part)
-  const results = await finaliseAndWrite(convo);
+  const results = await finaliseAndWrite(convo, prefs.scoroUserId);
 
   // Save confirmed event→project mappings for future memory
   await saveMemoryForDrafts(userId, approvedDrafts);
 
   await clearConversation(userId);
 
-  const written = results.filter((r) => !r.error && r.action !== "skipped");
+  const written = results.filter((r) => !r.error && r.action !== "skipped" && r.action !== "failed");
   const failed = results.filter((r) => r.error);
 
   let summary = `\u2705 Done. ${written.length} entry${written.length === 1 ? "" : "s"} written to Scoro:\n`;

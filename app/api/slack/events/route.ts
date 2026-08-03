@@ -639,11 +639,22 @@ async function handleCatchUp(
   });
   const dateStr = formatDateStr(targetDate);
 
+  // Validate Scoro user ID before checking
+  const catchUpPrefs = await loadUserPrefs(userId);
+  if (!catchUpPrefs.scoroUserId) {
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: "Your Scoro user ID hasn't been set up yet. Please reconnect at /connect or ask Foluso to set it manually." } }],
+      "Missing Scoro user ID"
+    );
+    return;
+  }
+
   const SCORO_CHECK_FAILED_MSG =
     "Couldn't verify Scoro for that date, so I won't risk a duplicate. Please check manually.";
 
   // Check if entries already exist for that day
-  const entriesCheck = await checkScoroEntriesForDate(dateStr);
+  const entriesCheck = await checkScoroEntriesForDate(dateStr, catchUpPrefs.scoroUserId);
   if (entriesCheck.error) {
     await postSlackReply(
       channelId,
@@ -670,7 +681,7 @@ async function handleCatchUp(
   }
 
   // Check if the week has been submitted
-  const weekCheck = await checkWeekSubmitted(dateStr);
+  const weekCheck = await checkWeekSubmitted(dateStr, catchUpPrefs.scoroUserId);
   if (weekCheck.error) {
     await postSlackReply(
       channelId,
@@ -798,9 +809,20 @@ async function handleDoneConfirm(
     return;
   }
 
+  // Validate Scoro user ID before writing
+  const donePrefs = await loadUserPrefs(userId);
+  if (!donePrefs.scoroUserId) {
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: "Your Scoro user ID hasn't been set up yet. Please reconnect at /connect or ask Foluso to set it manually." } }],
+      "Missing Scoro user ID"
+    );
+    return;
+  }
+
   await postThinking(channelId);
 
-  const results = await finaliseAndWrite(convo);
+  const results = await finaliseAndWrite(convo, donePrefs.scoroUserId);
 
   // Save confirmed event->project mappings for future memory
   for (const d of approvedDrafts) {
@@ -815,7 +837,7 @@ async function handleDoneConfirm(
 
   await clearConversation(userId);
 
-  const written = results.filter((r) => !r.error && r.action !== "skipped");
+  const written = results.filter((r) => !r.error && r.action !== "skipped" && r.action !== "failed");
   const failed = results.filter((r) => r.error);
 
   let summary = `\u2705 Done. ${written.length} entry${written.length === 1 ? "" : "s"} written to Scoro:\n`;

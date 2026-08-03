@@ -25,7 +25,6 @@ import { loadUserPrefs } from "./user-prefs";
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const SCORO_USER_ID = 107; // TEMP: Foluso's Scoro user ID, hardcoded for single-user
 const COPILOT_TAG = "[Co-pilot draft]";
 
 // ---------------------------------------------------------------------------
@@ -152,7 +151,8 @@ function durationStr(startISO: string, endISO: string): string {
 
 async function writeDraftsToScoro(
   events: CalendarEvent[],
-  matches: MatchResult[]
+  matches: MatchResult[],
+  scoroUserId: number
 ): Promise<{ written: WriteResult[]; skipped: MatchResult[] }> {
   const approved = matches.filter(
     (m) =>
@@ -179,7 +179,7 @@ async function writeDraftsToScoro(
 
     const payload: Record<string, unknown> = {
       event_id: match.task_id,
-      user_id: SCORO_USER_ID,
+      user_id: scoroUserId,
       start_datetime: event.start,
       end_datetime: event.end,
       duration: durationStr(event.start, event.end),
@@ -581,12 +581,13 @@ async function postSlackMessage(
 // Scoro date checks (for day catch-up feature)
 // ---------------------------------------------------------------------------
 export async function checkScoroEntriesForDate(
-  dateStr: string
+  dateStr: string,
+  scoroUserId: number
 ): Promise<{ hasEntries: boolean; count: number; error: boolean }> {
   try {
     const res = await scoroPost<Array<Record<string, unknown>>>("/timeEntries/list", {
       filter: {
-        user_id: SCORO_USER_ID,
+        user_id: scoroUserId,
         start_date: dateStr,
         end_date: dateStr,
       },
@@ -601,12 +602,13 @@ export async function checkScoroEntriesForDate(
 }
 
 export async function checkWeekSubmitted(
-  dateStr: string
+  dateStr: string,
+  scoroUserId: number
 ): Promise<{ submitted: boolean; error: boolean }> {
   try {
     const res = await scoroPost<Array<Record<string, unknown>>>("/timeSheets/list", {
       filter: {
-        user_id: SCORO_USER_ID,
+        user_id: scoroUserId,
         date: dateStr,
         status: "submitted",
       },
@@ -635,6 +637,26 @@ export async function runCopilotSummary(
 ): Promise<SummaryResult> {
   const { channelId = slackId, writeToScoro = true } = options;
   const cutoff = new Date();
+
+  // 0. Load user prefs and validate Scoro user ID
+  const prefs = await loadUserPrefs(slackId);
+  if (!prefs.scoroUserId) {
+    const errText = "Your Scoro user ID hasn't been set up yet. Please reconnect at /connect or ask Foluso to set it manually.";
+    await postSlackMessage(channelId, {
+      text: errText,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: errText } }],
+    });
+    return {
+      eventCount: 0,
+      matched: 0,
+      failed: 0,
+      skipped: 0,
+      slackStatus: "blocked: no scoroUserId",
+      written: [],
+      skippedEvents: [],
+    };
+  }
+  const scoroUserId = prefs.scoroUserId;
 
   // 1. Get Google access token
   const accessToken = await getAccessToken(slackId);
@@ -724,7 +746,6 @@ export async function runCopilotSummary(
   const matches = [...rememberedMatches, ...aiMatches];
 
   // 4b. Apply user's default role to task-uncertain matches
-  const prefs = await loadUserPrefs(slackId);
   if (prefs.defaultRole) {
     const roleLower = prefs.defaultRole.toLowerCase();
     for (const m of matches) {
@@ -747,7 +768,7 @@ export async function runCopilotSummary(
   let skipped: MatchResult[] = [];
 
   if (writeToScoro) {
-    const result = await writeDraftsToScoro(events, matches);
+    const result = await writeDraftsToScoro(events, matches, scoroUserId);
     written = result.written;
     skipped = result.skipped;
   } else {

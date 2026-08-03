@@ -3,7 +3,7 @@ import { loadUserPrefs, saveUserPrefs } from "@/lib/user-prefs";
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { slackId, defaultRole } = body;
+  const { slackId, defaultRole, scoroUserId } = body;
 
   if (!slackId || typeof slackId !== "string") {
     return NextResponse.json({ error: "Missing slackId" }, { status: 400 });
@@ -13,6 +13,10 @@ export async function POST(request: NextRequest) {
 
   if (typeof defaultRole === "string" || defaultRole === null) {
     prefs.defaultRole = defaultRole;
+  }
+
+  if (typeof scoroUserId === "number" || scoroUserId === null) {
+    prefs.scoroUserId = scoroUserId;
   }
 
   await saveUserPrefs(slackId, prefs);

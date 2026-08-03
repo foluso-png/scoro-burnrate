@@ -13,12 +13,15 @@ export interface UserPrefs {
   paused: boolean;
   /** Default role/task title for Scoro. Used to pre-fill task selection when a project has a matching task. */
   defaultRole: string | null;
+  /** Scoro user ID for this person. Resolved from email at onboarding. */
+  scoroUserId: number | null;
 }
 
 const DEFAULT_PREFS: UserPrefs = {
   deliveryHour: 17,
   paused: false,
   defaultRole: null,
+  scoroUserId: null,
 };
 
 function key(slackId: string): string {
