@@ -24,6 +24,7 @@ import {
 import { finaliseAndWrite } from "@/lib/scoro-writer";
 import { saveEventMapping } from "@/lib/event-memory";
 import { loadUserPrefs, saveUserPrefs } from "@/lib/user-prefs";
+import { CAMPFIRE_ROLES } from "@/lib/roles";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -592,6 +593,74 @@ async function handleDeliveryTime(
 }
 
 // ---------------------------------------------------------------------------
+// Role change — "set my role to Senior Account Manager", etc.
+// ---------------------------------------------------------------------------
+const ROLE_PATTERN =
+  /\b(?:set|change|update)\s+(?:my\s+)?role\s+to\s+(.+)/i;
+
+function matchRole(input: string): string | null {
+  const inputLower = input.trim().toLowerCase();
+  // Exact match first
+  const exact = CAMPFIRE_ROLES.find(
+    (r) => r.toLowerCase() === inputLower
+  );
+  if (exact) return exact;
+  // Substring match (input contained within a role name, or vice versa)
+  const partial = CAMPFIRE_ROLES.find(
+    (r) => r.toLowerCase().includes(inputLower) || inputLower.includes(r.toLowerCase())
+  );
+  return partial || null;
+}
+
+async function handleRoleChange(
+  userId: string,
+  channelId: string,
+  text: string
+): Promise<boolean> {
+  const match = ROLE_PATTERN.exec(text);
+  if (!match) return false;
+
+  const rawRole = match[1].trim().replace(/[."']+$/, ""); // strip trailing punctuation
+  const role = matchRole(rawRole);
+
+  if (!role) {
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `I couldn't find a role matching "${rawRole}". Try something like "set my role to Senior Account Manager". You can also set it at /connect.`,
+          },
+        },
+      ],
+      "Role not found"
+    );
+    return true;
+  }
+
+  const prefs = await loadUserPrefs(userId);
+  prefs.defaultRole = role;
+  await saveUserPrefs(userId, prefs);
+
+  await postSlackReply(
+    channelId,
+    [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `Role updated to *${role}*. I'll use this when matching your tasks from now on.`,
+        },
+      },
+    ],
+    "Role updated"
+  );
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Day catch-up — "go back to Monday", "catch up on Tuesday", etc.
 // ---------------------------------------------------------------------------
 const DAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
@@ -761,10 +830,17 @@ async function handleEndOfDay(
 ): Promise<void> {
   await postThinking(channelId);
   try {
-    await runCopilotSummary(userId, {
+    const result = await runCopilotSummary(userId, {
       channelId,
       writeToScoro: false,
     });
+    if (result.slackStatus === "skipped: already sent today") {
+      await postSlackReply(
+        channelId,
+        [{ type: "section", text: { type: "mrkdwn", text: "You've already had today's summary. Check your messages above." } }],
+        "Already sent today"
+      );
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("On-demand summary error:", msg);
@@ -921,6 +997,7 @@ export async function POST(request: NextRequest) {
       // Check for pause/resume or delivery time before anything else
       if (await handlePauseResume(userId, channelId, text)) return;
       if (await handleDeliveryTime(userId, channelId, text)) return;
+      if (await handleRoleChange(userId, channelId, text)) return;
 
       // Check for day catch-up ("go back to Monday", etc.)
       const catchUpDate = parseCatchUpDay(text);

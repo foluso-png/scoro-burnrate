@@ -15,6 +15,10 @@ export interface UserPrefs {
   defaultRole: string | null;
   /** Scoro user ID for this person. Resolved from email at onboarding. */
   scoroUserId: number | null;
+  /** Date string (YYYY-MM-DD, Europe/London) of the last summary sent. Used to prevent duplicates. */
+  lastSummarySentDate: string | null;
+  /** Whether the one-time welcome DM has been sent. Prevents re-sending on reconnect. */
+  hasReceivedWelcome: boolean;
 }
 
 const DEFAULT_PREFS: UserPrefs = {
@@ -22,7 +26,24 @@ const DEFAULT_PREFS: UserPrefs = {
   paused: false,
   defaultRole: null,
   scoroUserId: null,
+  lastSummarySentDate: null,
+  hasReceivedWelcome: false,
 };
+
+/** Today's date as YYYY-MM-DD in Europe/London timezone. */
+export function todayLondon(): string {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const y = parts.find((p) => p.type === "year")!.value;
+  const m = parts.find((p) => p.type === "month")!.value;
+  const d = parts.find((p) => p.type === "day")!.value;
+  return `${y}-${m}-${d}`;
+}
 
 function key(slackId: string): string {
   return `${KEY_PREFIX}${slackId}`;

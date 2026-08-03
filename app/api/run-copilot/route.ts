@@ -9,7 +9,7 @@ import { runCopilotSummary, SummaryResult } from "@/lib/copilot-summary";
 import { listRegisteredUsers } from "@/lib/google-auth";
 import { getProjectLookup } from "@/lib/matcher";
 import { saveLastRun } from "@/lib/last-run";
-import { loadUserPrefs } from "@/lib/user-prefs";
+import { loadUserPrefs, todayLondon } from "@/lib/user-prefs";
 
 // ---------------------------------------------------------------------------
 // Per-user result shape for the JSON response
@@ -41,6 +41,8 @@ export async function GET(request: NextRequest) {
   );
   const currentHour = nowLondon.getHours();
 
+  const todayStr = todayLondon();
+
   // 1. Discover all registered users
   const userIds = await listRegisteredUsers();
 
@@ -67,6 +69,14 @@ export async function GET(request: NextRequest) {
         slackId,
         status: "skipped",
         reason: `hour mismatch (wants ${prefs.deliveryHour}, now ${currentHour})`,
+      });
+      continue;
+    }
+    if (prefs.lastSummarySentDate === todayStr) {
+      skippedResults.push({
+        slackId,
+        status: "skipped",
+        reason: "already sent today",
       });
       continue;
     }

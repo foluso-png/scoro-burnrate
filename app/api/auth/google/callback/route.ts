@@ -67,6 +67,84 @@ async function resolveScoroUserId(email: string): Promise<number | null> {
   }
 }
 
+/**
+ * Send a plain text DM to a Slack user via chat.postMessage.
+ * Posting to a user ID as the channel opens a DM automatically.
+ */
+async function sendSlackDM(slackId: string, text: string): Promise<void> {
+  const slackToken = process.env.SLACK_BOT_TOKEN;
+  if (!slackToken) return;
+
+  try {
+    await fetch("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${slackToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ channel: slackId, text }),
+    });
+  } catch (err) {
+    console.error("Failed to send Slack DM:", err);
+  }
+}
+
+/**
+ * Send the one-time welcome DM with Block Kit formatting.
+ */
+async function sendWelcomeDM(
+  slackId: string,
+  firstName: string
+): Promise<void> {
+  const slackToken = process.env.SLACK_BOT_TOKEN;
+  if (!slackToken) return;
+
+  const blocks = [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `\ud83d\udc4b Hey ${firstName}, welcome to your new timesheet co-pilot!\n\nThink of me as your personal assistant for Scoro, minus the coffee runs \u2615\ufe0f. I'll check your calendar and match your meetings to the right projects, then send you a draft every evening around 5pm. Prefer a different time? Just message me something like "send my summary at 6pm".`,
+      },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*A few things worth knowing:*\n\ud83d\udc40 I review your calendar, I don't watch it \u2014 just a once-a-day look, no live tracking\n\u2705 Nothing hits Scoro until you say yes\n\u26a1 Fancy trying it right now? Just type "log my day"`,
+      },
+    },
+    {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: "\ud83d\udccc Pin this chat so you can find me easily next time",
+        },
+      ],
+    },
+  ];
+
+  const fallbackText = `\ud83d\udc4b Hey ${firstName}, welcome to your new timesheet co-pilot! Type "log my day" to get started.`;
+
+  try {
+    await fetch("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${slackToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: slackId,
+        text: fallbackText,
+        blocks,
+      }),
+    });
+  } catch (err) {
+    console.error("Failed to send welcome DM:", err);
+  }
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
   const code = searchParams.get("code");
@@ -142,10 +220,26 @@ export async function GET(request: NextRequest) {
 
     // Resolve and store Scoro user ID
     const scoroUserId = await resolveScoroUserId(email);
+    const prefs = await loadUserPrefs(slackId);
+
     if (scoroUserId) {
-      const prefs = await loadUserPrefs(slackId);
       prefs.scoroUserId = scoroUserId;
       await saveUserPrefs(slackId, prefs);
+
+      // Send one-time welcome DM (only on first connect, not reconnects)
+      if (!prefs.hasReceivedWelcome) {
+        const firstName = name.split(" ")[0] || name;
+        await sendWelcomeDM(slackId, firstName);
+        prefs.hasReceivedWelcome = true;
+        await saveUserPrefs(slackId, prefs);
+      }
+    } else {
+      // Scoro account not found — warn but don't block the connection
+      console.warn(`No Scoro user found for ${email}`);
+      await sendSlackDM(
+        slackId,
+        `I've connected your Google Calendar, but I couldn't find a Scoro account matching ${email}. Ask Foluso to set your Scoro user ID manually so I can start logging your time.`
+      );
     }
 
     const url = new URL("/connect", request.url);
