@@ -273,11 +273,49 @@ export async function getProjectLookup(): Promise<ProjectLookup> {
 // AI matching — shared by run-copilot and Slack free-text input
 // ---------------------------------------------------------------------------
 export function timeSlot(startISO: string, endISO: string): string {
-  const s = new Date(startISO);
-  const e = new Date(endISO);
   const fmt = (d: Date) =>
-    `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  return `${fmt(s)}-${fmt(e)}`;
+    d.toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: "Europe/London",
+      hour12: false,
+    });
+  return `${fmt(new Date(startISO))}-${fmt(new Date(endISO))}`;
+}
+
+/**
+ * Strip the timezone offset from an ISO datetime string, producing a naive
+ * datetime in the original local time. Scoro expects datetimes in the
+ * account's timezone (Europe/London) without an offset.
+ *
+ * "2026-08-03T14:00:00+01:00" -> "2026-08-03T14:00:00"
+ * "2026-08-03T14:00:00Z"      -> converts to Europe/London first
+ * "2026-08-03T14:00:00"       -> no-op
+ */
+export function toNaiveLondon(iso: string): string {
+  // If already naive (no offset, no Z), return as-is
+  if (!/[Z+-]\d{0,2}:?\d{0,2}$/.test(iso)) return iso;
+
+  // For strings with an explicit non-UTC offset like +01:00,
+  // the local time is already correct, just strip the suffix
+  if (/[+-]\d{2}:\d{2}$/.test(iso)) {
+    return iso.replace(/[+-]\d{2}:\d{2}$/, "");
+  }
+
+  // For Z (UTC), convert to Europe/London wall-clock time
+  const d = new Date(iso);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)!.value;
+  return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}`;
 }
 
 // ---------------------------------------------------------------------------
