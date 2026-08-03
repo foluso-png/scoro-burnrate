@@ -15,6 +15,7 @@ import { runCopilotSummary } from "@/lib/copilot-summary";
 import { saveEventMapping } from "@/lib/event-memory";
 import { getProjectLookup } from "@/lib/matcher";
 import { loadUserPrefs } from "@/lib/user-prefs";
+import { saveProjectTaskMapping } from "@/lib/project-task-memory";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -603,6 +604,11 @@ async function handleSelectTask(
       task_id: taskId,
       task_title: task?.title || null,
     });
+  }
+
+  // Remember this task choice for all future entries on this project
+  if (draft.projectId && task) {
+    await saveProjectTaskMapping(userId, draft.projectId, taskId, task.title);
   }
 
   await postResponseWithButtons(
