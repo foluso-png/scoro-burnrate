@@ -21,6 +21,7 @@ import {
 } from "./event-memory";
 import { pickSignOff } from "./sign-off";
 import { loadUserPrefs, saveUserPrefs, todayLondon } from "./user-prefs";
+import { loadProjectTaskMemory } from "./project-task-memory";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -767,13 +768,31 @@ export async function runCopilotSummary(
       : [];
   const matches = [...rememberedMatches, ...aiMatches];
 
-  // 4b. Apply user's default role to task-uncertain matches
-  if (prefs.defaultRole) {
-    const roleLower = prefs.defaultRole.toLowerCase();
-    for (const m of matches) {
-      if (m.task_confident || m.project_id === null) continue;
-      const project = activeProjects.find((p) => p.project_id === m.project_id);
-      if (!project) continue;
+  // 4b. Apply remembered project→task mappings, then default role
+  const projectTaskMem = await loadProjectTaskMemory(slackId);
+
+  for (const m of matches) {
+    if (m.task_confident || m.project_id === null) continue;
+    const project = activeProjects.find((p) => p.project_id === m.project_id);
+    if (!project) continue;
+
+    // First: check per-project task memory (user previously picked a task here)
+    const remembered = projectTaskMem[String(m.project_id)];
+    if (remembered) {
+      const taskStillExists = project.tasks.find(
+        (t) => t.task_id === remembered.task_id
+      );
+      if (taskStillExists) {
+        m.task_id = taskStillExists.task_id;
+        m.task_title = taskStillExists.title;
+        m.task_confident = true;
+        continue;
+      }
+    }
+
+    // Second: try exact defaultRole match
+    if (prefs.defaultRole) {
+      const roleLower = prefs.defaultRole.toLowerCase();
       const roleTask = project.tasks.find(
         (t) => t.title.toLowerCase() === roleLower
       );
@@ -781,8 +800,12 @@ export async function runCopilotSummary(
         m.task_id = roleTask.task_id;
         m.task_title = roleTask.title;
         m.task_confident = true;
+        continue;
       }
     }
+
+    // No match found: mark as uncertain so the user gets a dropdown
+    m.task_confident = false;
   }
 
   // 5. Optionally write approved drafts to Scoro
