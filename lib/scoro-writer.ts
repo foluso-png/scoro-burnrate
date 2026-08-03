@@ -7,7 +7,6 @@ import type { ConversationState, DraftEntry } from "./conversation";
 // ---------------------------------------------------------------------------
 const COPILOT_TAG = "[Co-pilot]";
 const COPILOT_DRAFT_TAG = "[Co-pilot draft]";
-const SCORO_USER_ID = 107; // TEMP: Foluso's Scoro user ID, hardcoded for single-user
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,7 +27,7 @@ export interface WriteResultItem {
   eventTitle: string;
   projectName: string | null;
   durationMinutes: number;
-  action: "created" | "updated" | "skipped";
+  action: "created" | "updated" | "skipped" | "failed";
   scoroEntryId: number | null;
   error: string | null;
 }
@@ -56,7 +55,7 @@ function isCopilotEntry(description: string | undefined): boolean {
 // ---------------------------------------------------------------------------
 // Fetch today's co-pilot entries for the user
 // ---------------------------------------------------------------------------
-async function fetchTodayCopilotEntries(): Promise<ScoroTimeEntry[]> {
+async function fetchTodayCopilotEntries(scoroUserId: number): Promise<ScoroTimeEntry[]> {
   const today = new Date();
   const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
@@ -66,7 +65,7 @@ async function fetchTodayCopilotEntries(): Promise<ScoroTimeEntry[]> {
   while (true) {
     const res = await scoroPost<ScoroTimeEntry[]>("/timeEntries/list", {
       filter: {
-        user_id: SCORO_USER_ID,
+        user_id: scoroUserId,
         start_date: dateStr,
         end_date: dateStr,
       },
@@ -83,11 +82,28 @@ async function fetchTodayCopilotEntries(): Promise<ScoroTimeEntry[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Read-back verification — confirm an entry actually exists after write
+// ---------------------------------------------------------------------------
+async function verifyEntryExists(entryId: number): Promise<boolean> {
+  try {
+    const res = await scoroPost<Record<string, unknown>>(
+      `/timeEntries/view/${entryId}`,
+      {}
+    );
+    const id = (res.data.time_entry_id as number) || (res.data.id as number);
+    return id === entryId;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Write or update a single entry
 // ---------------------------------------------------------------------------
 async function writeOrUpdateEntry(
   draft: DraftEntry,
-  existingEntries: ScoroTimeEntry[]
+  existingEntries: ScoroTimeEntry[],
+  scoroUserId: number
 ): Promise<WriteResultItem> {
   if (!draft.approved || draft.projectId === null || draft.taskId === null) {
     return {
@@ -135,6 +151,19 @@ async function writeOrUpdateEntry(
         },
       });
 
+      // Read-back verification
+      const verified = await verifyEntryExists(entryId);
+      if (!verified) {
+        return {
+          eventTitle: draft.eventTitle,
+          projectName: draft.projectName,
+          durationMinutes: totalMins,
+          action: "failed",
+          scoroEntryId: null,
+          error: "Scoro accepted the update but the entry could not be verified afterwards",
+        };
+      }
+
       return {
         eventTitle: draft.eventTitle,
         projectName: draft.projectName,
@@ -156,6 +185,19 @@ async function writeOrUpdateEntry(
           is_completed: true,
         },
       });
+
+      // Read-back verification
+      const verified = await verifyEntryExists(draft.scoroEntryId);
+      if (!verified) {
+        return {
+          eventTitle: draft.eventTitle,
+          projectName: draft.projectName,
+          durationMinutes: durationMins,
+          action: "failed",
+          scoroEntryId: null,
+          error: "Scoro accepted the update but the entry could not be verified afterwards",
+        };
+      }
 
       return {
         eventTitle: draft.eventTitle,
@@ -180,7 +222,7 @@ async function writeOrUpdateEntry(
     const res = await scoroPost<Record<string, unknown>>("/timeEntries/modify", {
       request: {
         event_id: draft.taskId,
-        user_id: SCORO_USER_ID,
+        user_id: scoroUserId,
         start_datetime: startDatetime,
         end_datetime: endDatetime,
         duration: durationToStr(durationMins),
@@ -191,6 +233,19 @@ async function writeOrUpdateEntry(
 
     const entryId =
       (res.data.time_entry_id as number) || (res.data.id as number);
+
+    // Read-back verification
+    const verified = await verifyEntryExists(entryId);
+    if (!verified) {
+      return {
+        eventTitle: draft.eventTitle,
+        projectName: draft.projectName,
+        durationMinutes: durationMins,
+        action: "failed",
+        scoroEntryId: null,
+        error: "Scoro accepted the write but the entry could not be verified afterwards",
+      };
+    }
 
     return {
       eventTitle: draft.eventTitle,
@@ -205,7 +260,7 @@ async function writeOrUpdateEntry(
       eventTitle: draft.eventTitle,
       projectName: draft.projectName,
       durationMinutes: durationMins,
-      action: "created",
+      action: "failed",
       scoroEntryId: null,
       error: err instanceof Error ? err.message : String(err),
     };
@@ -237,7 +292,8 @@ export async function updateExistingEntry(
 // Finalise conversation — write all approved drafts to Scoro
 // ---------------------------------------------------------------------------
 export async function finaliseAndWrite(
-  convo: ConversationState
+  convo: ConversationState,
+  scoroUserId: number
 ): Promise<WriteResultItem[]> {
   const approvedDrafts = convo.drafts.filter(
     (d) => d.approved && d.projectId !== null && d.taskId !== null
@@ -248,16 +304,16 @@ export async function finaliseAndWrite(
   }
 
   // Fetch existing co-pilot entries for match-and-update
-  const existingEntries = await fetchTodayCopilotEntries();
+  const existingEntries = await fetchTodayCopilotEntries(scoroUserId);
 
   const results: WriteResultItem[] = [];
   for (const draft of approvedDrafts) {
-    const result = await writeOrUpdateEntry(draft, existingEntries);
+    const result = await writeOrUpdateEntry(draft, existingEntries, scoroUserId);
     results.push(result);
 
     // If we created/updated an entry, add it to the "existing" list so
     // subsequent drafts for the same task will match-and-update against it
-    if (result.scoroEntryId && result.action !== "skipped") {
+    if (result.scoroEntryId && result.action !== "skipped" && result.action !== "failed") {
       existingEntries.push({
         time_entry_id: result.scoroEntryId,
         event_id: draft.taskId!,
