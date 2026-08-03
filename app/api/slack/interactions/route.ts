@@ -619,10 +619,16 @@ async function handleWrapUp(
   await postToResponseUrl(responseUrl, "Running your summary\u2026");
 
   try {
-    await runCopilotSummary(userId, {
+    const result = await runCopilotSummary(userId, {
       channelId,
       writeToScoro: false,
     });
+    if (result.slackStatus === "skipped: already sent today") {
+      await postToResponseUrl(
+        responseUrl,
+        "You've already had today's summary. Check your messages above."
+      );
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await postToResponseUrl(

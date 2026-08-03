@@ -20,7 +20,7 @@ import {
   EventMemory,
 } from "./event-memory";
 import { pickSignOff } from "./sign-off";
-import { loadUserPrefs } from "./user-prefs";
+import { loadUserPrefs, saveUserPrefs, todayLondon } from "./user-prefs";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -633,6 +633,7 @@ export async function runCopilotSummary(
     writeToScoro?: boolean; // write drafts to Scoro; defaults to true
     projectLookup?: { projects: ProjectRecord[] }; // pre-fetched lookup to share across users
     targetDate?: Date; // run for a specific past date instead of today
+    skipDedupe?: boolean; // bypass the "already sent today" check (used by catch-up)
   } = {}
 ): Promise<SummaryResult> {
   const { channelId = slackId, writeToScoro = true } = options;
@@ -640,6 +641,21 @@ export async function runCopilotSummary(
 
   // 0. Load user prefs and validate Scoro user ID
   const prefs = await loadUserPrefs(slackId);
+
+  // 0a. Duplicate guard — skip if today's summary was already sent
+  const today = todayLondon();
+  if (!options.skipDedupe && !options.targetDate && prefs.lastSummarySentDate === today) {
+    return {
+      eventCount: 0,
+      matched: 0,
+      failed: 0,
+      skipped: 0,
+      slackStatus: "skipped: already sent today",
+      written: [],
+      skippedEvents: [],
+    };
+  }
+
   if (!prefs.scoroUserId) {
     const errText = "Your Scoro user ID hasn't been set up yet. Please reconnect at /connect or ask Foluso to set it manually.";
     await postSlackMessage(channelId, {
@@ -678,6 +694,12 @@ export async function runCopilotSummary(
         buildSummaryActionButtons(),
       ],
     });
+
+    // Stamp today's date to prevent duplicate summaries
+    if (!options.targetDate) {
+      prefs.lastSummarySentDate = today;
+      await saveUserPrefs(slackId, prefs);
+    }
 
     const convo = newConversation(slackId, []);
     convo.step = "review_matches";
@@ -809,6 +831,12 @@ export async function runCopilotSummary(
     text: summaryText,
     blocks,
   });
+
+  // 6c. Stamp today's date to prevent duplicate summaries
+  if (!options.targetDate) {
+    prefs.lastSummarySentDate = today;
+    await saveUserPrefs(slackId, prefs);
+  }
 
   // 7. Create conversation state so user can interact via buttons
   const eventSummaries: CalendarEventSummary[] = events.map((e) => ({
