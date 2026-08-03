@@ -248,7 +248,7 @@ export function buildSummaryActionButtons(): Record<string, unknown> {
         type: "button",
         text: {
           type: "plain_text",
-          text: "\ud83d\udd04 Wrap up my day",
+          text: "\ud83d\udcdd Log my day",
           emoji: true,
         },
         action_id: "wrap_up",

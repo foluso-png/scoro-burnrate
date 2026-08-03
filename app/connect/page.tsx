@@ -87,7 +87,7 @@ export default async function ConnectPage({
                 </p>
                 <p className="text-sm" style={{ color: "#C9B8A8" }}>
                   You&apos;ll get your first summary this afternoon. If you
-                  can&apos;t wait, message the bot &quot;wrap up my day&quot; in
+                  can&apos;t wait, message the bot &quot;log my day&quot; in
                   Slack.
                 </p>
               </div>

@@ -288,7 +288,7 @@ export function timeSlot(startISO: string, endISO: string): string {
 const FREE_TEXT_MODEL = "claude-haiku-4-5-20251001";
 
 // ---------------------------------------------------------------------------
-// AI intent classification — detect end-of-day / wrap-up messages
+// AI intent classification — detect end-of-day / log-my-day messages
 // ---------------------------------------------------------------------------
 export type EodIntent = "summary" | "done" | "none";
 
@@ -302,8 +302,8 @@ export async function classifyEndOfDayIntent(
     max_tokens: 10,
     system: `You classify Slack messages from an employee to a timesheet bot. Decide which intent applies:
 
-SUMMARY — The user wants to see their end-of-day summary, run the timesheet copilot, or start wrapping up. They want to SEE something.
-Examples: "wrap up my day", "show me my summary", "what does my timesheet look like", "run my summary", "let's wrap up"
+SUMMARY — The user wants to see their end-of-day summary, run the timesheet copilot, or start logging their day. They want to SEE something.
+Examples: "log my day", "wrap up my day", "show me my summary", "what does my timesheet look like", "run my summary", "let's wrap up"
 
 DONE — The user is confirming they are FINISHED. They have already been reviewing entries and are saying everything looks good, nothing more to add, they are satisfied. This is a confirmation, not a request.
 Examples: "that's everything", "all done", "I'm finished", "that's everything done", "nothing else to add", "yep that's right", "looks good thanks", "that's it"
