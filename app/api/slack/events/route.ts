@@ -931,7 +931,7 @@ export async function POST(request: NextRequest) {
 
       // If the message doesn't look like a time entry, check if it's
       // an end-of-day intent (via AI). This runs before conversation
-      // state so "wrap up" / "done" works even mid-session.
+      // state so "log my day" / "wrap up" / "done" works even mid-session.
       if (!looksLikeTimeEntry(text)) {
         const intent = await classifyEndOfDayIntent(text);
         if (intent === "summary") {
