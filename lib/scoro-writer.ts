@@ -1,5 +1,5 @@
 import "server-only";
-import { scoroPost } from "./matcher";
+import { scoroPost, toNaiveLondon } from "./matcher";
 import type { ConversationState, DraftEntry } from "./conversation";
 
 // ---------------------------------------------------------------------------
@@ -215,9 +215,21 @@ async function writeOrUpdateEntry(
     const description = `${COPILOT_TAG} ${draft.description}`;
 
     // For manual entries without specific times, use 09:00 as start
-    const startDatetime = draft.startDatetime || `${dateStr}T09:00:00`;
-    const endMs = new Date(startDatetime).getTime() + durationMins * 60000;
-    const endDatetime = draft.endDatetime || new Date(endMs).toISOString();
+    const rawStart = draft.startDatetime || `${dateStr}T09:00:00`;
+    const startDatetime = toNaiveLondon(rawStart);
+    const rawEnd = draft.endDatetime;
+    let endDatetime: string;
+    if (rawEnd) {
+      endDatetime = toNaiveLondon(rawEnd);
+    } else {
+      // Compute end by adding duration to the naive start (no UTC round-trip)
+      const [datePart, timePart] = startDatetime.split("T");
+      const [hh, mm, ss] = timePart.split(":").map(Number);
+      const totalMins = hh * 60 + mm + durationMins;
+      const endH = Math.floor(totalMins / 60) % 24;
+      const endM = totalMins % 60;
+      endDatetime = `${datePart}T${String(endH).padStart(2, "0")}:${String(endM).padStart(2, "0")}:${String(ss || 0).padStart(2, "0")}`;
+    }
 
     const res = await scoroPost<Record<string, unknown>>("/timeEntries/modify", {
       request: {

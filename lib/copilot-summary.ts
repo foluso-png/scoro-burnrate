@@ -11,6 +11,7 @@ import {
   getProjectLookup,
   scoroPost,
   timeSlot,
+  toNaiveLondon,
   MatchResult,
   ProjectRecord,
 } from "./matcher";
@@ -181,8 +182,8 @@ async function writeDraftsToScoro(
     const payload: Record<string, unknown> = {
       event_id: match.task_id,
       user_id: scoroUserId,
-      start_datetime: event.start,
-      end_datetime: event.end,
+      start_datetime: toNaiveLondon(event.start),
+      end_datetime: toNaiveLondon(event.end),
       duration: durationStr(event.start, event.end),
       description,
       is_completed: false,
