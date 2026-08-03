@@ -29,6 +29,7 @@ export const CAMPFIRE_ROLES = [
   "Senior Project Manager",
   "Project Manager",
   "Project Co-ordinator",
+  "Operations Manager",
 ] as const;
 
 export type CampfireRole = (typeof CAMPFIRE_ROLES)[number];
