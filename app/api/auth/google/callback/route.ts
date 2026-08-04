@@ -104,24 +104,15 @@ async function sendWelcomeDM(
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `\ud83d\udc4b Hey ${firstName}, welcome to your new timesheet co-pilot!\n\nThink of me as your personal assistant for Scoro, minus the coffee runs \u2615\ufe0f. I'll check your calendar and match your meetings to the right projects, then send you a draft every evening around 5pm. Prefer a different time? Just message me something like "send my summary at 6pm".`,
+        text: `\ud83d\udc4b Hey ${firstName}, welcome to your new timesheet co-pilot!\n\nThink of me as your personal assistant for Scoro, minus the coffee runs \u2615\ufe0f. Every evening around 5pm, I'll check your calendar, match your meetings to the right project, and send you a draft to review here in Slack. Nothing hits Scoro until you say yes.`,
       },
     },
     {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*A few things worth knowing:*\n\ud83d\udc40 I review your calendar, I don't watch it \u2014 just a once-a-day look, no live tracking\n\u2705 Nothing hits Scoro until you say yes\n\u26a1 Fancy trying it right now? Just type "log my day"`,
+        text: `\u26a1 Fancy trying it right now? Just type "log my day"\n\ud83d\udcac Want to know all the amazing things you can do? Just ask me "how does it work"\n\ud83d\udccc Pin this chat so you can find me easily next time`,
       },
-    },
-    {
-      type: "context",
-      elements: [
-        {
-          type: "mrkdwn",
-          text: "\ud83d\udccc Pin this chat so you can find me easily next time",
-        },
-      ],
     },
   ];
 
