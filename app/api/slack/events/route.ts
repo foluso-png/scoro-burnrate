@@ -661,6 +661,52 @@ async function handleRoleChange(
 }
 
 // ---------------------------------------------------------------------------
+// "How does it work" / help handler
+// ---------------------------------------------------------------------------
+const HELP_PATTERN =
+  /\b(how does (it|this) work|what can you do|what are the commands|help me|show me the commands)\b/i;
+
+// Also match bare "help" but only if it's the entire message (not part of a longer sentence)
+function isHelpRequest(text: string): boolean {
+  if (HELP_PATTERN.test(text)) return true;
+  return /^\s*help\s*[?!.]?\s*$/i.test(text);
+}
+
+async function handleHowItWorks(
+  userId: string,
+  channelId: string,
+  text: string
+): Promise<boolean> {
+  if (!isHelpRequest(text)) return false;
+
+  const helpText = `*Here's everything I can do:*
+
+*The daily summary* \u2014 around 5pm I check your calendar and send a draft. You'll see four buttons:
+\u2705 *Looks right* \u2014 saves it to Scoro
+\u2795 *Add time* \u2014 log something extra, e.g. "30 mins internal admin and 1 hour with Joe"
+\u270f\ufe0f *Fix an entry* \u2014 correct anything wrong, e.g. "the Nicola call was 45 minutes, not 30"
+\ud83d\udcdd *Log my day* \u2014 get your summary on demand, any time
+
+*Things you can just say to me:*
+\u2022 "Send my summary at 6pm" \u2014 change your delivery time
+\u2022 "Stop notifications" / "Start notifications" \u2014 pause or resume
+\u2022 "Set my role to [your role]" \u2014 update it if it changes
+\u2022 "Go back to Monday" \u2014 catch up on any earlier day in the current week (Monday through yesterday)
+
+*Worth knowing:*
+\ud83d\udc40 I review your calendar once a day, no live tracking
+\u2705 Nothing's ever submitted without you confirming it
+\ud83d\udeab Personal events like lunch are automatically left out`;
+
+  await postSlackReply(
+    channelId,
+    [{ type: "section", text: { type: "mrkdwn", text: helpText } }],
+    "How it works"
+  );
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Day catch-up — "go back to Monday", "catch up on Tuesday", etc.
 // ---------------------------------------------------------------------------
 const DAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
@@ -998,6 +1044,7 @@ export async function POST(request: NextRequest) {
       if (await handlePauseResume(userId, channelId, text)) return;
       if (await handleDeliveryTime(userId, channelId, text)) return;
       if (await handleRoleChange(userId, channelId, text)) return;
+      if (await handleHowItWorks(userId, channelId, text)) return;
 
       // Check for day catch-up ("go back to Monday", etc.)
       const catchUpDate = parseCatchUpDay(text);
