@@ -516,9 +516,9 @@ async function processFixCorrection(
 // Pause / resume notifications
 // ---------------------------------------------------------------------------
 const PAUSE_PATTERN =
-  /\b(stop|pause|disable|turn off|mute)\b.*\b(notification|summary|summaries|copilot|co-pilot|bot|messages?)\b/i;
+  /\b(stop|pause|disable|turn off|mute)\b.*\b(notifications?|summary|summaries|copilot|co-pilot|bot|messages?)\b/i;
 const RESUME_PATTERN =
-  /\b(start|resume|enable|turn on|unmute)\b.*\b(notification|summary|summaries|copilot|co-pilot|bot|messages?)\b/i;
+  /\b(start|resume|enable|turn on|unmute)\b.*\b(notifications?|summary|summaries|copilot|co-pilot|bot|messages?)\b/i;
 
 async function handlePauseResume(
   userId: string,
@@ -1075,6 +1075,20 @@ export async function POST(request: NextRequest) {
       } else if (convo && convo.step === "fixing") {
         await postThinking(channelId);
         await handleFixText(userId, channelId, text);
+      } else {
+        await postSlackReply(
+          channelId,
+          [
+            {
+              type: "section",
+              text: {
+                type: "mrkdwn",
+                text: "Sorry, I didn't quite catch that. Try:\n\u2022 *Log my day* \u2014 get your daily summary\n\u2022 *Stop notifications* / *Start notifications*\n\u2022 *How does it work* \u2014 see everything I can do",
+              },
+            },
+          ],
+          "Unrecognised message"
+        );
       }
     } catch (err) {
       console.error(
