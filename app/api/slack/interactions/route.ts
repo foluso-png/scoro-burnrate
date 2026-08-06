@@ -16,6 +16,11 @@ import { saveEventMapping } from "@/lib/event-memory";
 import { getProjectLookup } from "@/lib/matcher";
 import { loadUserPrefs } from "@/lib/user-prefs";
 import { saveProjectTaskMapping } from "@/lib/project-task-memory";
+import {
+  loadPendingLeave,
+  clearPendingLeave,
+} from "@/lib/pending-leave";
+import { scoroPost } from "@/lib/matcher";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -645,6 +650,71 @@ async function handleWrapUp(
 }
 
 // ---------------------------------------------------------------------------
+// Annual leave confirmation
+// ---------------------------------------------------------------------------
+async function handleConfirmLeave(
+  userId: string,
+  responseUrl: string
+): Promise<void> {
+  const leave = await loadPendingLeave(userId);
+  if (!leave) {
+    await postToResponseUrl(responseUrl, "No pending leave request found. Try again.");
+    return;
+  }
+
+  try {
+    const res = await scoroPost<{ id: number }>("/timeOffs/modify", {
+      request: {
+        type: "vacation",
+        reason: "Annual leave",
+        start_date: leave.dates[0],
+        end_date: leave.dates[leave.dates.length - 1],
+        usersDates: [
+          {
+            user_id: leave.scoroUserId,
+            dates: leave.dates.map((d) => ({ date: d, value: -1 })),
+          },
+        ],
+      },
+    });
+
+    const entryId = res.data?.id;
+    if (!entryId) {
+      const errMsg =
+        (res as { messages?: { error?: string[] } }).messages?.error?.[0] ||
+        "Unknown error";
+      await postToResponseUrl(
+        responseUrl,
+        `Failed to write leave to Scoro: ${errMsg}`
+      );
+      await clearPendingLeave(userId);
+      return;
+    }
+
+    await clearPendingLeave(userId);
+    await postToResponseUrl(
+      responseUrl,
+      `\u2705 Annual leave logged for *${leave.startLabel}* (${leave.dates.length} day${leave.dates.length === 1 ? "" : "s"}). Scoro entry ID: ${entryId}.`
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await clearPendingLeave(userId);
+    await postToResponseUrl(
+      responseUrl,
+      `Something went wrong writing leave to Scoro: ${msg}`
+    );
+  }
+}
+
+async function handleRejectLeave(
+  userId: string,
+  responseUrl: string
+): Promise<void> {
+  await clearPendingLeave(userId);
+  await postToResponseUrl(responseUrl, "No worries, leave not logged.");
+}
+
+// ---------------------------------------------------------------------------
 // POST handler — acknowledge immediately, defer work with after()
 // ---------------------------------------------------------------------------
 export async function POST(request: NextRequest) {
@@ -745,6 +815,12 @@ export async function POST(request: NextRequest) {
         }
         case "wrap_up":
           await handleWrapUp(userId, responseUrl, channelId);
+          break;
+        case "confirm_leave":
+          await handleConfirmLeave(userId, responseUrl);
+          break;
+        case "reject_leave":
+          await handleRejectLeave(userId, responseUrl);
           break;
         default:
           console.warn(`Unknown action_id: ${actionId}`);

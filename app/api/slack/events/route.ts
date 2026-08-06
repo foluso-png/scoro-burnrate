@@ -23,8 +23,9 @@ import {
 } from "@/lib/copilot-summary";
 import { finaliseAndWrite } from "@/lib/scoro-writer";
 import { saveEventMapping } from "@/lib/event-memory";
-import { loadUserPrefs, saveUserPrefs } from "@/lib/user-prefs";
+import { loadUserPrefs, saveUserPrefs, todayLondon } from "@/lib/user-prefs";
 import { CAMPFIRE_ROLES } from "@/lib/roles";
+import { savePendingLeave } from "@/lib/pending-leave";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -692,6 +693,7 @@ async function handleHowItWorks(
 \u2022 "Stop notifications" / "Start notifications" \u2014 pause or resume
 \u2022 "Set my role to [your role]" \u2014 update it if it changes
 \u2022 "Go back to Monday" \u2014 catch up on any earlier day in the current week (Monday through yesterday)
+\u2022 "I'm on annual leave [today/this week/Monday to Wednesday]" \u2014 log leave in Scoro
 
 *Worth knowing:*
 \ud83d\udc40 I review your calendar once a day, no live tracking
@@ -702,6 +704,275 @@ async function handleHowItWorks(
     channelId,
     [{ type: "section", text: { type: "mrkdwn", text: helpText } }],
     "How it works"
+  );
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Annual leave handler
+// ---------------------------------------------------------------------------
+const LEAVE_PATTERN =
+  /\b(?:i'?m|i\s+am|i\s+was|i'?ll\s+be|was)\b.*?\b(?:on\s+)?(?:annual\s+leave|off|on\s+leave|on\s+holiday)\b/i;
+
+function isLeaveRequest(text: string): boolean {
+  return LEAVE_PATTERN.test(text);
+}
+
+/**
+ * Parse a date or range from a leave message. Returns an array of YYYY-MM-DD
+ * weekday strings. Handles: "today", "yesterday", "this week", "Monday",
+ * "Monday to Wednesday", "Mon-Wed", "next week", bare date request (defaults to today).
+ */
+function parseLeaveDates(text: string): string[] | null {
+  const lower = text.toLowerCase();
+  const todayStr = todayLondon();
+  const today = new Date(todayStr + "T12:00:00"); // noon to avoid TZ edge cases
+
+  function toDateStr(d: Date): string {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function weekdaysBetween(start: Date, end: Date): string[] {
+    const dates: string[] = [];
+    const d = new Date(start);
+    while (d <= end) {
+      const dow = d.getDay();
+      if (dow !== 0 && dow !== 6) dates.push(toDateStr(d));
+      d.setDate(d.getDate() + 1);
+    }
+    return dates;
+  }
+
+  // "this week" — Monday to Friday of the current week
+  if (/\bthis\s+week\b/.test(lower)) {
+    const dow = today.getDay();
+    const mondayOffset = dow === 0 ? -6 : 1 - dow;
+    const monday = new Date(today);
+    monday.setDate(today.getDate() + mondayOffset);
+    const friday = new Date(monday);
+    friday.setDate(monday.getDate() + 4);
+    return weekdaysBetween(monday, friday);
+  }
+
+  // "next week" — Monday to Friday of next week
+  if (/\bnext\s+week\b/.test(lower)) {
+    const dow = today.getDay();
+    const daysUntilNextMon = dow === 0 ? 1 : 8 - dow;
+    const monday = new Date(today);
+    monday.setDate(today.getDate() + daysUntilNextMon);
+    const friday = new Date(monday);
+    friday.setDate(monday.getDate() + 4);
+    return weekdaysBetween(monday, friday);
+  }
+
+  const dayNames: Record<string, number> = {
+    monday: 1, mon: 1,
+    tuesday: 2, tue: 2, tues: 2,
+    wednesday: 3, wed: 3,
+    thursday: 4, thu: 4, thurs: 4,
+    friday: 5, fri: 5,
+  };
+
+  // Range: "Monday to Wednesday", "Mon-Fri", "Tuesday to Thursday"
+  const rangeMatch = lower.match(
+    /\b(mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:rs(?:day)?)?|fri(?:day)?)\s*(?:to|-)\s*(mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:rs(?:day)?)?|fri(?:day)?)\b/
+  );
+  if (rangeMatch) {
+    const startDow = dayNames[rangeMatch[1]];
+    const endDow = dayNames[rangeMatch[2]];
+    if (startDow !== undefined && endDow !== undefined && startDow <= endDow) {
+      // Find the next occurrence of startDow from today (or this week if in the past)
+      const currentDow = today.getDay() === 0 ? 7 : today.getDay();
+      let diff = startDow - currentDow;
+      // If the start day is in the past this week, still use this week's date
+      const startDate = new Date(today);
+      startDate.setDate(today.getDate() + diff);
+      const endDate = new Date(startDate);
+      endDate.setDate(startDate.getDate() + (endDow - startDow));
+      return weekdaysBetween(startDate, endDate);
+    }
+  }
+
+  // Single day name: "Monday", "Friday"
+  const singleDayMatch = lower.match(
+    /\b(mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:rs(?:day)?)?|fri(?:day)?)\b/
+  );
+  if (singleDayMatch) {
+    const targetDow = dayNames[singleDayMatch[1]];
+    if (targetDow !== undefined) {
+      const currentDow = today.getDay() === 0 ? 7 : today.getDay();
+      const diff = targetDow - currentDow;
+      const target = new Date(today);
+      target.setDate(today.getDate() + diff);
+      const dow = target.getDay();
+      if (dow !== 0 && dow !== 6) return [toDateStr(target)];
+    }
+  }
+
+  // "yesterday"
+  if (/\byesterday\b/.test(lower)) {
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    const dow = yesterday.getDay();
+    if (dow === 0 || dow === 6) return null; // weekend
+    return [toDateStr(yesterday)];
+  }
+
+  // "today" or no specific date mentioned (default to today)
+  if (/\btoday\b/.test(lower) || !rangeMatch && !singleDayMatch) {
+    const dow = today.getDay();
+    if (dow === 0 || dow === 6) return null; // weekend
+    return [toDateStr(today)];
+  }
+
+  return null;
+}
+
+function formatLeaveLabel(dates: string[]): string {
+  if (dates.length === 0) return "";
+  if (dates.length === 1) {
+    const d = new Date(dates[0] + "T12:00:00");
+    return d.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
+  }
+  const first = new Date(dates[0] + "T12:00:00");
+  const last = new Date(dates[dates.length - 1] + "T12:00:00");
+  const fmtFirst = first.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+  const fmtLast = last.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+  return `${fmtFirst} to ${fmtLast}`;
+}
+
+async function handleAnnualLeave(
+  userId: string,
+  channelId: string,
+  text: string
+): Promise<boolean> {
+  if (!isLeaveRequest(text)) return false;
+
+  const dates = parseLeaveDates(text);
+  if (!dates || dates.length === 0) {
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "I couldn't work out which date(s) you mean. Try something like:\n\u2022 _\"I'm on annual leave today\"_\n\u2022 _\"I was off Monday to Wednesday\"_\n\u2022 _\"I'm on annual leave this week\"_",
+          },
+        },
+      ],
+      "Couldn't parse leave dates"
+    );
+    return true;
+  }
+
+  const prefs = await loadUserPrefs(userId);
+  if (!prefs.scoroUserId) {
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "Your Scoro user ID hasn't been set up yet. Please reconnect at /connect or ask Foluso to set it manually.",
+          },
+        },
+      ],
+      "Missing Scoro user ID"
+    );
+    return true;
+  }
+
+  // Check each date for existing time entries
+  const datesWithEntries: string[] = [];
+  for (const dateStr of dates) {
+    const check = await checkScoroEntriesForDate(dateStr, prefs.scoroUserId);
+    if (check.error) {
+      await postSlackReply(
+        channelId,
+        [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: "Couldn't verify Scoro for those dates, so I won't risk overwriting anything. Please check manually.",
+            },
+          },
+        ],
+        "Scoro check failed"
+      );
+      return true;
+    }
+    if (check.hasEntries) datesWithEntries.push(dateStr);
+  }
+
+  if (datesWithEntries.length > 0) {
+    const blockedDays = datesWithEntries
+      .map((d) => {
+        const dt = new Date(d + "T12:00:00");
+        return dt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
+      })
+      .join(", ");
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `You've already got time entries logged for: *${blockedDays}*. I can't add leave on top of those. Please check Scoro directly.`,
+          },
+        },
+      ],
+      "Dates already have entries"
+    );
+    return true;
+  }
+
+  const label = formatLeaveLabel(dates);
+  const dayCount = dates.length;
+
+  // Store pending leave for confirmation
+  await savePendingLeave({
+    slackUserId: userId,
+    scoroUserId: prefs.scoroUserId,
+    dates,
+    startLabel: label,
+  });
+
+  await postSlackReply(
+    channelId,
+    [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `Log annual leave for *${label}* (${dayCount} day${dayCount === 1 ? "" : "s"})?`,
+        },
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "\u2705 Yes", emoji: true },
+            action_id: "confirm_leave",
+            style: "primary",
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "\u274c No", emoji: true },
+            action_id: "reject_leave",
+            style: "danger",
+          },
+        ],
+      },
+    ],
+    `Log annual leave for ${label}?`
   );
   return true;
 }
@@ -1045,6 +1316,7 @@ export async function POST(request: NextRequest) {
       if (await handleDeliveryTime(userId, channelId, text)) return;
       if (await handleRoleChange(userId, channelId, text)) return;
       if (await handleHowItWorks(userId, channelId, text)) return;
+      if (await handleAnnualLeave(userId, channelId, text)) return;
 
       // Check for day catch-up ("go back to Monday", etc.)
       const catchUpDate = parseCatchUpDay(text);
