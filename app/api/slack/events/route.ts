@@ -22,10 +22,18 @@ import {
   checkWeekSubmitted,
 } from "@/lib/copilot-summary";
 import { finaliseAndWrite } from "@/lib/scoro-writer";
-import { saveEventMapping } from "@/lib/event-memory";
+import {
+  saveEventMapping,
+  loadEventMemory,
+  deleteEventMappingsByProject,
+} from "@/lib/event-memory";
 import { loadUserPrefs, saveUserPrefs, todayLondon } from "@/lib/user-prefs";
 import { CAMPFIRE_ROLES } from "@/lib/roles";
 import { savePendingLeave } from "@/lib/pending-leave";
+import {
+  loadProjectTaskMemory,
+  deleteProjectTaskMapping,
+} from "@/lib/project-task-memory";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -662,6 +670,130 @@ async function handleRoleChange(
 }
 
 // ---------------------------------------------------------------------------
+// "Forget this" — clear a remembered project-task mapping
+// ---------------------------------------------------------------------------
+const FORGET_PATTERN =
+  /\b(?:forget|reset|clear|remove)\b.*?\b(?:task|project|mapping|memory|match)\b/i;
+
+function isForgetRequest(text: string): boolean {
+  return FORGET_PATTERN.test(text);
+}
+
+async function handleForget(
+  userId: string,
+  channelId: string,
+  text: string
+): Promise<boolean> {
+  if (!isForgetRequest(text)) return false;
+
+  const projectTaskMem = await loadProjectTaskMemory(userId);
+  const projectIds = Object.keys(projectTaskMem);
+
+  if (projectIds.length === 0) {
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "You don't have any remembered project-task mappings to clear.",
+          },
+        },
+      ],
+      "No memories to clear"
+    );
+    return true;
+  }
+
+  // Look up project names
+  const lookup = await getProjectLookup();
+  const projectMap = new Map(
+    lookup.projects.map((p) => [String(p.project_id), p.name])
+  );
+
+  // Check if the user named a specific project
+  const lower = text.toLowerCase();
+  let matchedProjectId: string | null = null;
+
+  for (const pid of projectIds) {
+    const name = projectMap.get(pid);
+    if (!name) continue;
+    if (lower.includes(name.toLowerCase())) {
+      matchedProjectId = pid;
+      break;
+    }
+    // Also try the task title — "forget my 121 task"
+    const mapping = projectTaskMem[pid];
+    if (mapping.task_title && lower.includes(mapping.task_title.toLowerCase())) {
+      matchedProjectId = pid;
+      break;
+    }
+  }
+
+  // Also try matching client name from the message
+  if (!matchedProjectId) {
+    for (const pid of projectIds) {
+      const project = lookup.projects.find(
+        (p) => p.project_id === parseInt(pid, 10)
+      );
+      if (!project?.client_name) continue;
+      if (lower.includes(project.client_name.toLowerCase())) {
+        matchedProjectId = pid;
+        break;
+      }
+    }
+  }
+
+  if (matchedProjectId) {
+    const pid = parseInt(matchedProjectId, 10);
+    const projectName = projectMap.get(matchedProjectId) || "unknown project";
+    const mapping = projectTaskMem[matchedProjectId];
+
+    await deleteProjectTaskMapping(userId, pid);
+    const removedEvents = await deleteEventMappingsByProject(userId, pid);
+
+    let reply = `Cleared remembered mapping for *${projectName}*`;
+    if (mapping.task_title) {
+      reply += ` (was: ${mapping.task_title})`;
+    }
+    if (removedEvents.length > 0) {
+      reply += `. Also cleared ${removedEvents.length} event memory${removedEvents.length === 1 ? "" : "s"} for that project`;
+    }
+    reply += ". I'll ask you again next time it comes up.";
+
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: reply } }],
+      "Memory cleared"
+    );
+    return true;
+  }
+
+  // No specific project named — list what we remember and ask
+  const lines = projectIds.map((pid) => {
+    const name = projectMap.get(pid) || `Project ${pid}`;
+    const mapping = projectTaskMem[pid];
+    return `\u2022 *${name}* \u2192 ${mapping.task_title || "unknown task"}`;
+  });
+
+  await postSlackReply(
+    channelId,
+    [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `Which project should I forget? Here's what I remember:\n\n${lines.join("\n")}\n\nSay something like _\"forget my Wella task\"_ or _\"forget Campfire Internal\"_.`,
+        },
+      },
+    ],
+    "Which project to forget?"
+  );
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // "How does it work" / help handler
 // ---------------------------------------------------------------------------
 const HELP_PATTERN =
@@ -694,6 +826,7 @@ async function handleHowItWorks(
 \u2022 "Set my role to [your role]" \u2014 update it if it changes
 \u2022 "Go back to Monday" \u2014 catch up on any earlier day in the current week (Monday through yesterday)
 \u2022 "I'm on annual leave [today/this week/Monday to Wednesday]" \u2014 log leave in Scoro
+\u2022 "Forget my [project] task" \u2014 clear a remembered project-task mapping so I ask again
 
 *Worth knowing:*
 \ud83d\udc40 I review your calendar once a day, no live tracking
@@ -1315,6 +1448,7 @@ export async function POST(request: NextRequest) {
       if (await handlePauseResume(userId, channelId, text)) return;
       if (await handleDeliveryTime(userId, channelId, text)) return;
       if (await handleRoleChange(userId, channelId, text)) return;
+      if (await handleForget(userId, channelId, text)) return;
       if (await handleHowItWorks(userId, channelId, text)) return;
       if (await handleAnnualLeave(userId, channelId, text)) return;
 

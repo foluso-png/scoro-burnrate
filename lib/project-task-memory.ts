@@ -50,3 +50,24 @@ export async function saveProjectTaskMapping(
     ex: TTL_SECONDS,
   });
 }
+
+export async function deleteProjectTaskMapping(
+  slackUserId: string,
+  projectId: number
+): Promise<boolean> {
+  const memory = await loadProjectTaskMemory(slackUserId);
+  const key_ = String(projectId);
+  if (!(key_ in memory)) return false;
+
+  delete memory[key_];
+
+  const redis = await getRedis();
+  if (Object.keys(memory).length === 0) {
+    await redis.del(key(slackUserId));
+  } else {
+    await redis.set(key(slackUserId), JSON.stringify(memory), {
+      ex: TTL_SECONDS,
+    });
+  }
+  return true;
+}
