@@ -259,50 +259,6 @@ export function buildSummaryActionButtons(): Record<string, unknown> {
   };
 }
 
-function buildProjectDropdownOptions(
-  activeProjects: ProjectRecord[],
-  suggestedMatch: MatchResult | null
-): Array<{ text: { type: string; text: string }; value: string }> {
-  const options: Array<{
-    text: { type: string; text: string };
-    value: string;
-  }> = [];
-
-  // AI suggestion first (if it has a project with a valid task)
-  if (suggestedMatch?.project_id && suggestedMatch.task_id) {
-    options.push({
-      text: {
-        type: "plain_text",
-        text: `${suggestedMatch.project_name} (${suggestedMatch.client_name || "no client"})`.slice(0, 75),
-      },
-      value: `${suggestedMatch.project_id}:${suggestedMatch.task_id}`,
-    });
-  }
-
-  // All other active projects (only those with at least one task)
-  for (const p of activeProjects) {
-    if (suggestedMatch?.project_id === p.project_id) continue;
-    if (p.tasks.length === 0) continue;
-    const firstTask = p.tasks[0];
-    const label = p.client_name
-      ? `${p.name} (${p.client_name})`
-      : p.name;
-    options.push({
-      text: { type: "plain_text", text: label.slice(0, 75) },
-      value: `${p.project_id}:${firstTask.task_id}`,
-    });
-    if (options.length >= 99) break; // Slack max 100 options
-  }
-
-  // "Skip" option
-  options.push({
-    text: { type: "plain_text", text: "Skip this event" },
-    value: "skip",
-  });
-
-  return options;
-}
-
 function buildTaskDropdownOptions(
   project: ProjectRecord,
   suggestedTaskId: number | null
@@ -459,7 +415,6 @@ function formatSlackBlocks(
       const event = events.find((e) => e.id === s.event_id);
       const title = event?.title || s.event_id;
       const time = event ? timeSlot(event.start, event.end) : "";
-      const options = buildProjectDropdownOptions(activeProjects, s);
       lowConfBlocks.push({
         type: "section",
         block_id: `low_conf_${i}`,
@@ -468,10 +423,10 @@ function formatSlackBlocks(
           text: `${time} *${title}*`,
         },
         accessory: {
-          type: "static_select",
+          type: "external_select",
           action_id: "select_project",
-          placeholder: { type: "plain_text", text: "Pick a project..." },
-          options,
+          placeholder: { type: "plain_text", text: "Search for a project..." },
+          min_query_length: 0,
         },
       });
     }

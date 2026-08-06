@@ -15,7 +15,10 @@ import { runCopilotSummary } from "@/lib/copilot-summary";
 import { saveEventMapping } from "@/lib/event-memory";
 import { getProjectLookup } from "@/lib/matcher";
 import { loadUserPrefs } from "@/lib/user-prefs";
-import { saveProjectTaskMapping } from "@/lib/project-task-memory";
+import {
+  loadProjectTaskMemory,
+  saveProjectTaskMapping,
+} from "@/lib/project-task-memory";
 import {
   loadPendingLeave,
   clearPendingLeave,
@@ -481,7 +484,6 @@ async function handleSelectProject(
   }
 
   // blockId is "low_conf_0", "low_conf_1", etc.
-  // This maps to the index of skipped/low-confidence drafts
   const lowConfIdx = parseInt(blockId.replace("low_conf_", ""), 10);
   const unapprovedDrafts = convo.drafts.filter((d) => !d.approved);
 
@@ -494,7 +496,6 @@ async function handleSelectProject(
   const draftIdx = convo.drafts.indexOf(draft);
 
   if (selectedValue === "skip") {
-    // Remove the draft entirely
     convo.drafts.splice(draftIdx, 1);
     await saveConversation(convo);
     await postResponseWithButtons(
@@ -504,12 +505,19 @@ async function handleSelectProject(
     return;
   }
 
-  // Parse "pid:tid" value
-  const [pidStr, tidStr] = selectedValue.split(":");
-  const projectId = parseInt(pidStr, 10);
-  const taskId = parseInt(tidStr, 10) || null;
+  // Value is now just the project ID (no task baked in)
+  const projectId = parseInt(selectedValue, 10);
+  if (isNaN(projectId)) {
+    // Backwards compat: handle old "pid:tid" format if cached messages exist
+    const parts = selectedValue.split(":");
+    const pid = parseInt(parts[0], 10);
+    if (!isNaN(pid)) {
+      return handleSelectProject(userId, responseUrl, blockId, parts[0]);
+    }
+    await postToResponseUrl(responseUrl, "Invalid selection.");
+    return;
+  }
 
-  // Look up names from project data
   const lookup = await getProjectLookup();
   const project = lookup.projects.find((p) => p.project_id === projectId);
 
@@ -518,29 +526,129 @@ async function handleSelectProject(
     return;
   }
 
-  const task = taskId
-    ? project.tasks.find((t) => t.task_id === taskId) || null
-    : project.tasks[0] || null;
+  // Task resolution: memory > defaultRole > single task > ask
+  let resolvedTask = project.tasks[0] || null;
+  let taskConfident = project.tasks.length <= 1;
 
-  // Update the draft
+  // 1. Check project-task memory
+  const projectTaskMem = await loadProjectTaskMemory(userId);
+  const remembered = projectTaskMem[String(projectId)];
+  if (remembered) {
+    const memTask = project.tasks.find(
+      (t) => t.task_id === remembered.task_id
+    );
+    if (memTask) {
+      resolvedTask = memTask;
+      taskConfident = true;
+    }
+  }
+
+  // 2. Check defaultRole
+  if (!taskConfident && project.tasks.length > 1) {
+    const prefs = await loadUserPrefs(userId);
+    if (prefs.defaultRole) {
+      const roleLower = prefs.defaultRole.toLowerCase();
+      const roleMatch = project.tasks.find(
+        (t) => t.title.toLowerCase().includes(roleLower)
+      );
+      if (roleMatch) {
+        resolvedTask = roleMatch;
+        taskConfident = true;
+      }
+    }
+  }
+
+  // 3. If still uncertain and multiple tasks, show task dropdown
+  if (!taskConfident && project.tasks.length > 1) {
+    // Set draft to this project but mark task as uncertain
+    convo.drafts[draftIdx] = {
+      ...draft,
+      projectId: project.project_id,
+      projectName: project.name,
+      taskId: resolvedTask?.task_id ?? null,
+      taskTitle: resolvedTask?.title ?? null,
+      confidence: "high",
+      description: draft.description,
+      approved: true,
+      taskUncertain: true,
+    };
+    await saveConversation(convo);
+
+    // Save event memory (project known, task will be refined)
+    await saveEventMapping(userId, draft.eventTitle, {
+      project_id: project.project_id,
+      project_name: project.name,
+      task_id: resolvedTask?.task_id ?? null,
+      task_title: resolvedTask?.title ?? null,
+    });
+
+    // Count task-uncertain drafts to get the right block_id index
+    const taskUncertainDrafts = convo.drafts.filter(
+      (d) => d.approved && d.taskUncertain
+    );
+    const taskIdx = taskUncertainDrafts.indexOf(convo.drafts[draftIdx]);
+    const taskBlockId = `task_conf_${taskIdx >= 0 ? taskIdx : 0}`;
+
+    const taskOptions = project.tasks.map((t) => ({
+      text: { type: "plain_text" as const, text: t.title.slice(0, 75) },
+      value: String(t.task_id),
+    }));
+
+    const channelId = convo.slackChannelId || userId;
+    const token = process.env.SLACK_BOT_TOKEN;
+    if (token) {
+      await fetch("https://slack.com/api/chat.postMessage", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          channel: channelId,
+          text: `Matched *${draft.eventTitle}* to *${project.name}*. Which task/role?`,
+          blocks: [
+            {
+              type: "section",
+              block_id: taskBlockId,
+              text: {
+                type: "mrkdwn",
+                text: `Matched *${draft.eventTitle}* to *${project.name}*. Which task/role?`,
+              },
+              accessory: {
+                type: "static_select",
+                action_id: "select_task",
+                placeholder: {
+                  type: "plain_text",
+                  text: "Pick your role/task...",
+                },
+                options: taskOptions,
+              },
+            },
+          ],
+        }),
+      });
+    }
+    return;
+  }
+
+  // Confident in both project and task — approve and save
   convo.drafts[draftIdx] = {
     ...draft,
     projectId: project.project_id,
     projectName: project.name,
-    taskId: task?.task_id ?? null,
-    taskTitle: task?.title ?? null,
+    taskId: resolvedTask?.task_id ?? null,
+    taskTitle: resolvedTask?.title ?? null,
     confidence: "high",
     description: draft.description,
     approved: true,
   };
   await saveConversation(convo);
 
-  // Save to event memory for future runs
   await saveEventMapping(userId, draft.eventTitle, {
     project_id: project.project_id,
     project_name: project.name,
-    task_id: task?.task_id ?? null,
-    task_title: task?.title ?? null,
+    task_id: resolvedTask?.task_id ?? null,
+    task_title: resolvedTask?.title ?? null,
   });
 
   const dur = draft.durationMinutes
@@ -548,7 +656,7 @@ async function handleSelectProject(
     : "";
   await postResponseWithButtons(
     responseUrl,
-    `Matched *${draft.eventTitle}* ${dur ? `(${dur}) ` : ""}\u2192 *${project.name}*. Saved for next time.`
+    `Matched *${draft.eventTitle}* ${dur ? `(${dur}) ` : ""}\u2192 *${project.name}* (${resolvedTask?.title || "default task"}). Saved for next time.`
   );
 }
 

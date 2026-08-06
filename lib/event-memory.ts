@@ -80,3 +80,33 @@ export async function lookupEventMapping(
   const normalised = normaliseTitle(eventTitle);
   return memory[normalised] || null;
 }
+
+export async function deleteEventMappingsByProject(
+  slackUserId: string,
+  projectId: number
+): Promise<string[]> {
+  const memory = await loadEventMemory(slackUserId);
+  const removed: string[] = [];
+
+  for (const [key, mapping] of Object.entries(memory)) {
+    if (mapping.project_id === projectId) {
+      removed.push(key);
+      delete memory[key];
+    }
+  }
+
+  if (removed.length > 0) {
+    const redis = await getRedis();
+    if (Object.keys(memory).length === 0) {
+      await redis.del(`${KEY_PREFIX}${slackUserId}`);
+    } else {
+      await redis.set(
+        `${KEY_PREFIX}${slackUserId}`,
+        JSON.stringify(memory),
+        { ex: TTL_SECONDS }
+      );
+    }
+  }
+
+  return removed;
+}
