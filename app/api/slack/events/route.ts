@@ -27,9 +27,10 @@ import {
   loadEventMemory,
   deleteEventMappingsByProject,
 } from "@/lib/event-memory";
-import { loadUserPrefs, saveUserPrefs, todayLondon } from "@/lib/user-prefs";
+import { loadUserPrefs, saveUserPrefs, todayLondon, isDemoMode, DEMO_BANNER } from "@/lib/user-prefs";
 import { CAMPFIRE_ROLES } from "@/lib/roles";
 import { savePendingLeave } from "@/lib/pending-leave";
+import { DemoModeBlockedError } from "@/lib/demo-gate";
 import {
   loadProjectTaskMemory,
   deleteProjectTaskMapping,
@@ -101,10 +102,15 @@ function formatDuration(mins: number): string {
 async function postSlackReply(
   channel: string,
   blocks: Record<string, unknown>[],
-  text: string
+  text: string,
+  banner?: string
 ): Promise<void> {
   const token = process.env.SLACK_BOT_TOKEN;
   if (!token) return;
+
+  const finalBlocks = banner
+    ? [{ type: "section", text: { type: "mrkdwn", text: banner.trim() } }, ...blocks]
+    : blocks;
 
   await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
@@ -112,7 +118,7 @@ async function postSlackReply(
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ channel, text, blocks }),
+    body: JSON.stringify({ channel, text, blocks: finalBlocks }),
   });
 }
 
@@ -555,6 +561,58 @@ async function handlePauseResume(
       channelId,
       [{ type: "section", text: { type: "mrkdwn", text: `Notifications resumed. You'll get your summary at ${timeStr} each weekday.` } }],
       "Notifications resumed"
+    );
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Demo mode toggle
+// ---------------------------------------------------------------------------
+const DEMO_ON_PATTERN =
+  /\b(?:turn on|enable|start|activate)\b.*\bdemo\s*mode\b/i;
+const DEMO_OFF_PATTERN =
+  /\b(?:turn off|disable|stop|deactivate)\b.*\bdemo\s*mode\b/i;
+const DEMO_STATUS_PATTERN =
+  /\b(?:am i|are we|is .* (?:in|on))\b.*\bdemo\s*mode\b/i;
+
+async function handleDemoMode(
+  userId: string,
+  channelId: string,
+  text: string
+): Promise<boolean> {
+  if (DEMO_ON_PATTERN.test(text)) {
+    const prefs = await loadUserPrefs(userId);
+    prefs.demoMode = true;
+    await saveUserPrefs(userId, prefs);
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: DEMO_BANNER + "Demo mode is now *on*. Everything will run as normal but no data will be written to Scoro. Say \"turn off demo mode\" to go back to live." } }],
+      "Demo mode on"
+    );
+    return true;
+  }
+  if (DEMO_OFF_PATTERN.test(text)) {
+    const prefs = await loadUserPrefs(userId);
+    prefs.demoMode = false;
+    await saveUserPrefs(userId, prefs);
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: "Demo mode is now *off*. Writes to Scoro are live again." } }],
+      "Demo mode off"
+    );
+    return true;
+  }
+  if (DEMO_STATUS_PATTERN.test(text)) {
+    const prefs = await loadUserPrefs(userId);
+    const status = prefs.demoMode
+      ? DEMO_BANNER + "Demo mode is *on*. Say \"turn off demo mode\" to go live."
+      : "Demo mode is *off*. Everything you confirm will be written to Scoro.";
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: status } }],
+      "Demo mode status"
     );
     return true;
   }
@@ -1348,7 +1406,32 @@ async function handleDoneConfirm(
 
   await postThinking(channelId);
 
-  const results = await finaliseAndWrite(convo, donePrefs.scoroUserId);
+  let results: Awaited<ReturnType<typeof finaliseAndWrite>>;
+  try {
+    results = await finaliseAndWrite(convo, donePrefs.scoroUserId);
+  } catch (err) {
+    if (err instanceof DemoModeBlockedError) {
+      // Save memory and clear session even in demo mode
+      for (const d of approvedDrafts) {
+        if (!d.startDatetime || !d.projectId) continue;
+        await saveEventMapping(userId, d.eventTitle, {
+          project_id: d.projectId,
+          project_name: d.projectName || "",
+          task_id: d.taskId,
+          task_title: d.taskTitle,
+        });
+      }
+      await clearConversation(userId);
+      const count = approvedDrafts.length;
+      await postSlackReply(
+        channelId,
+        [{ type: "section", text: { type: "mrkdwn", text: DEMO_BANNER + `${count} entry${count === 1 ? "" : "s"} matched but nothing was saved to Scoro.` } }],
+        "Demo mode — nothing saved"
+      );
+      return;
+    }
+    throw err;
+  }
 
   // Save confirmed event->project mappings for future memory
   for (const d of approvedDrafts) {
@@ -1363,7 +1446,7 @@ async function handleDoneConfirm(
 
   await clearConversation(userId);
 
-  const written = results.filter((r) => !r.error && r.action !== "skipped" && r.action !== "failed");
+  const written = results.filter((r) => !r.error && r.action !== "skipped" && r.action !== "skipped_demo" && r.action !== "failed");
   const failed = results.filter((r) => r.error);
 
   let summary = `\u2705 Done. ${written.length} entry${written.length === 1 ? "" : "s"} written to Scoro:\n`;
@@ -1446,6 +1529,7 @@ export async function POST(request: NextRequest) {
     try {
       // Check for pause/resume or delivery time before anything else
       if (await handlePauseResume(userId, channelId, text)) return;
+      if (await handleDemoMode(userId, channelId, text)) return;
       if (await handleDeliveryTime(userId, channelId, text)) return;
       if (await handleRoleChange(userId, channelId, text)) return;
       if (await handleForget(userId, channelId, text)) return;

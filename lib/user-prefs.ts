@@ -19,6 +19,8 @@ export interface UserPrefs {
   lastSummarySentDate: string | null;
   /** Whether the one-time welcome DM has been sent. Prevents re-sending on reconnect. */
   hasReceivedWelcome: boolean;
+  /** Demo mode: full Slack flow runs but all Scoro writes are blocked. */
+  demoMode?: boolean;
 }
 
 const DEFAULT_PREFS: UserPrefs = {
@@ -28,7 +30,15 @@ const DEFAULT_PREFS: UserPrefs = {
   scoroUserId: null,
   lastSummarySentDate: null,
   hasReceivedWelcome: false,
+  demoMode: false,
 };
+
+export const DEMO_BANNER =
+  "\ud83e\uddea *Demo mode*. Nothing will be saved to Scoro.\n\n";
+
+export function isDemoMode(prefs: UserPrefs): boolean {
+  return prefs.demoMode === true;
+}
 
 /** Today's date as YYYY-MM-DD in Europe/London timezone. */
 export function todayLondon(): string {

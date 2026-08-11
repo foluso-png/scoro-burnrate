@@ -21,8 +21,9 @@ import {
   EventMemory,
 } from "./event-memory";
 import { pickSignOff } from "./sign-off";
-import { loadUserPrefs, saveUserPrefs, todayLondon } from "./user-prefs";
+import { loadUserPrefs, saveUserPrefs, todayLondon, DEMO_BANNER } from "./user-prefs";
 import { loadProjectTaskMemory } from "./project-task-memory";
+import { assertCanWrite } from "./demo-gate";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -152,10 +153,13 @@ function durationStr(startISO: string, endISO: string): string {
 }
 
 async function writeDraftsToScoro(
+  slackUserId: string,
   events: CalendarEvent[],
   matches: MatchResult[],
   scoroUserId: number
 ): Promise<{ written: WriteResult[]; skipped: MatchResult[] }> {
+  await assertCanWrite(slackUserId);
+
   const approved = matches.filter(
     (m) =>
       m.is_trackable !== false &&
@@ -642,14 +646,20 @@ export async function runCopilotSummary(
     { weekday: "long", day: "numeric", month: "long", year: "numeric" }
   );
 
+  const demoBannerBlock = prefs.demoMode
+    ? { type: "section", text: { type: "mrkdwn", text: DEMO_BANNER.trim() } }
+    : null;
+
   if (events.length === 0) {
     const text = `\ud83d\udc4b Here's your end-of-day summary \u2014 ${displayDate}\n\nNo events on the calendar for ${options.targetDate ? "that day" : "today"}. You can still add time below if you need to.`;
+    const emptyBlocks: Record<string, unknown>[] = [
+      ...(demoBannerBlock ? [demoBannerBlock] : []),
+      { type: "section", text: { type: "mrkdwn", text } },
+      buildSummaryActionButtons(),
+    ];
     const slackPost = await postSlackMessage(channelId, {
       text,
-      blocks: [
-        { type: "section", text: { type: "mrkdwn", text } },
-        buildSummaryActionButtons(),
-      ],
+      blocks: emptyBlocks,
     });
 
     // Stamp today's date to prevent duplicate summaries
@@ -769,7 +779,7 @@ export async function runCopilotSummary(
   let skipped: MatchResult[] = [];
 
   if (writeToScoro) {
-    const result = await writeDraftsToScoro(events, matches, scoroUserId);
+    const result = await writeDraftsToScoro(slackId, events, matches, scoroUserId);
     written = result.written;
     skipped = result.skipped;
   } else {
@@ -806,9 +816,10 @@ export async function runCopilotSummary(
     elements: [{ type: "mrkdwn", text: `_${signOff}_` }],
   });
 
+  const finalBlocks = demoBannerBlock ? [demoBannerBlock, ...blocks] : blocks;
   const slackPost = await postSlackMessage(channelId, {
     text: summaryText,
-    blocks,
+    blocks: finalBlocks,
   });
 
   // 6c. Stamp today's date to prevent duplicate summaries

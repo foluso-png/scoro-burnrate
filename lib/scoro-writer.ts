@@ -1,6 +1,7 @@
 import "server-only";
 import { scoroPost, toNaiveLondon } from "./matcher";
 import type { ConversationState, DraftEntry } from "./conversation";
+import { assertCanWrite } from "./demo-gate";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -27,7 +28,7 @@ export interface WriteResultItem {
   eventTitle: string;
   projectName: string | null;
   durationMinutes: number;
-  action: "created" | "updated" | "skipped" | "failed";
+  action: "created" | "updated" | "skipped" | "skipped_demo" | "failed";
   scoroEntryId: number | null;
   error: string | null;
 }
@@ -283,6 +284,7 @@ async function writeOrUpdateEntry(
 // Update an existing Scoro entry in place (used by the "Fix" flow)
 // ---------------------------------------------------------------------------
 export async function updateExistingEntry(
+  slackUserId: string,
   entryId: number,
   updates: {
     taskId?: number;
@@ -291,6 +293,8 @@ export async function updateExistingEntry(
     description?: string;
   }
 ): Promise<void> {
+  await assertCanWrite(slackUserId);
+
   const payload: Record<string, unknown> = {};
 
   if (updates.taskId !== undefined) payload.event_id = updates.taskId;
@@ -307,6 +311,8 @@ export async function finaliseAndWrite(
   convo: ConversationState,
   scoroUserId: number
 ): Promise<WriteResultItem[]> {
+  await assertCanWrite(convo.slackUserId);
+
   const approvedDrafts = convo.drafts.filter(
     (d) => d.approved && d.projectId !== null && d.taskId !== null
   );
@@ -325,7 +331,7 @@ export async function finaliseAndWrite(
 
     // If we created/updated an entry, add it to the "existing" list so
     // subsequent drafts for the same task will match-and-update against it
-    if (result.scoroEntryId && result.action !== "skipped" && result.action !== "failed") {
+    if (result.scoroEntryId && result.action !== "skipped" && result.action !== "skipped_demo" && result.action !== "failed") {
       existingEntries.push({
         time_entry_id: result.scoroEntryId,
         event_id: draft.taskId!,
