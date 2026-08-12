@@ -775,10 +775,12 @@ async function handleWrapUp(
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    await postToResponseUrl(
-      responseUrl,
-      `Something went wrong running your summary: ${msg}`
-    );
+    console.error("Wrap-up summary error:", msg);
+    const userFacing = msg.startsWith("Could not match")
+      || msg.startsWith("Your calendar matching was cut short")
+      ? msg
+      : "Something went wrong running your summary. Try again in a minute, or message Foluso if it keeps happening.";
+    await postToResponseUrl(responseUrl, userFacing);
   }
 }
 

@@ -484,18 +484,76 @@ Respond with ONLY a JSON array. Each element:
 
   const response = await anthropic.messages.create({
     model: "claude-sonnet-4-6",
-    max_tokens: 2000,
+    max_tokens: 4096,
     system: systemPrompt,
     messages: [{ role: "user", content: userMessage }],
   });
 
-  const text =
+  const firstAttempt = parseMatchResponse(response);
+  if (firstAttempt) return firstAttempt;
+
+  // Retry once with a stricter JSON-only instruction
+  console.warn(
+    "matchEvents: first attempt failed to parse, retrying with stricter prompt"
+  );
+  const retry = await anthropic.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 4096,
+    system:
+      "Return ONLY a raw JSON array. No markdown fences, no explanation.\n\n" +
+      systemPrompt,
+    messages: [{ role: "user", content: userMessage }],
+  });
+
+  const retryAttempt = parseMatchResponse(retry);
+  if (retryAttempt) return retryAttempt;
+
+  throw new Error(
+    "Could not match your calendar events after two attempts. Please try again in a minute, or message Foluso if it keeps happening."
+  );
+}
+
+/** Strip markdown code fences, extract the JSON array, and parse it.
+ *  Returns null on parse failure (caller should retry or throw).
+ *  Throws immediately on truncation (stop_reason=max_tokens) since retrying won't help. */
+function parseMatchResponse(
+  response: Anthropic.Message
+): MatchResult[] | null {
+  const raw =
     response.content[0].type === "text" ? response.content[0].text : "";
 
-  const jsonMatch = text.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    throw new Error("Claude did not return valid JSON");
+  if (response.stop_reason === "max_tokens") {
+    console.error(
+      "matchEvents: response truncated (stop_reason=max_tokens). Raw tail:",
+      raw.slice(-300)
+    );
+    throw new Error(
+      "Your calendar matching was cut short (too many events). Please try again in a minute, or message Foluso if it keeps happening."
+    );
   }
 
-  return JSON.parse(jsonMatch[0]);
+  // Strip markdown code fences (```json ... ``` or ``` ... ```)
+  const stripped = raw.replace(/```(?:json)?\s*/gi, "").replace(/```/g, "");
+
+  const jsonMatch = stripped.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    console.error(
+      "matchEvents: no JSON array found (stop_reason=%s). Raw response: %s",
+      response.stop_reason,
+      raw
+    );
+    return null;
+  }
+
+  try {
+    return JSON.parse(jsonMatch[0]) as MatchResult[];
+  } catch (parseErr) {
+    console.error(
+      "matchEvents: JSON.parse failed (stop_reason=%s). Error: %s\nRaw response: %s",
+      response.stop_reason,
+      parseErr instanceof Error ? parseErr.message : String(parseErr),
+      raw
+    );
+    return null;
+  }
 }

@@ -1352,6 +1352,10 @@ async function handleEndOfDay(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("On-demand summary error:", msg);
+    const userFacing = msg.startsWith("Could not match")
+      || msg.startsWith("Your calendar matching was cut short")
+      ? msg
+      : "Something went wrong running your summary. Try again in a minute, or message Foluso if it keeps happening.";
     await postSlackReply(
       channelId,
       [
@@ -1359,7 +1363,7 @@ async function handleEndOfDay(
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `Something went wrong running your summary: ${msg}`,
+            text: userFacing,
           },
         },
       ],
