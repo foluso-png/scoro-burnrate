@@ -24,6 +24,8 @@ import {
   clearPendingLeave,
 } from "@/lib/pending-leave";
 import { scoroPost } from "@/lib/matcher";
+import { assertCanWrite, DemoModeBlockedError } from "@/lib/demo-gate";
+import { isDemoMode, DEMO_BANNER } from "@/lib/user-prefs";
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -187,14 +189,29 @@ async function handleLooksRight(
   }
 
   // Write all approved drafts to Scoro (the slow part)
-  const results = await finaliseAndWrite(convo, prefs.scoroUserId);
+  let results: Awaited<ReturnType<typeof finaliseAndWrite>>;
+  try {
+    results = await finaliseAndWrite(convo, prefs.scoroUserId);
+  } catch (err) {
+    if (err instanceof DemoModeBlockedError) {
+      await saveMemoryForDrafts(userId, approvedDrafts);
+      await clearConversation(userId);
+      const count = approvedDrafts.length;
+      await postToResponseUrl(
+        responseUrl,
+        DEMO_BANNER + `${count} entry${count === 1 ? "" : "s"} matched but nothing was saved to Scoro.`
+      );
+      return;
+    }
+    throw err;
+  }
 
   // Save confirmed event→project mappings for future memory
   await saveMemoryForDrafts(userId, approvedDrafts);
 
   await clearConversation(userId);
 
-  const written = results.filter((r) => !r.error && r.action !== "skipped" && r.action !== "failed");
+  const written = results.filter((r) => !r.error && r.action !== "skipped" && r.action !== "skipped_demo" && r.action !== "failed");
   const failed = results.filter((r) => r.error);
 
   let summary = `\u2705 Done. ${written.length} entry${written.length === 1 ? "" : "s"} written to Scoro:\n`;
@@ -389,18 +406,26 @@ async function handleConfirmFix(
   // If there's an existing Scoro entry, update it in place
   if (draft.scoroEntryId && draft.taskId !== null) {
     try {
-      await updateExistingEntry(draft.scoroEntryId, {
+      await updateExistingEntry(userId, draft.scoroEntryId, {
         taskId: draft.taskId,
         durationMinutes: draft.durationMinutes || undefined,
         description: draft.description,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await postToResponseUrl(
-        responseUrl,
-        `Failed to update Scoro entry: ${msg}`
-      );
-      return;
+      if (err instanceof DemoModeBlockedError) {
+        await postToResponseUrl(
+          responseUrl,
+          DEMO_BANNER + "Fix noted but nothing was saved to Scoro."
+        );
+        // Still update conversation state so the demo flow continues
+      } else {
+        const msg = err instanceof Error ? err.message : String(err);
+        await postToResponseUrl(
+          responseUrl,
+          `Failed to update Scoro entry: ${msg}`
+        );
+        return;
+      }
     }
   }
 
@@ -750,10 +775,12 @@ async function handleWrapUp(
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    await postToResponseUrl(
-      responseUrl,
-      `Something went wrong running your summary: ${msg}`
-    );
+    console.error("Wrap-up summary error:", msg);
+    const userFacing = msg.startsWith("Could not match")
+      || msg.startsWith("Your calendar matching was cut short")
+      ? msg
+      : "Something went wrong running your summary. Try again in a minute, or message Foluso if it keeps happening.";
+    await postToResponseUrl(responseUrl, userFacing);
   }
 }
 
@@ -771,6 +798,8 @@ async function handleConfirmLeave(
   }
 
   try {
+    await assertCanWrite(userId);
+
     const res = await scoroPost<{ id: number }>("/timeOffs/modify", {
       request: {
         type: "vacation",
@@ -805,8 +834,15 @@ async function handleConfirmLeave(
       `\u2705 Annual leave logged for *${leave.startLabel}* (${leave.dates.length} day${leave.dates.length === 1 ? "" : "s"}). Scoro entry ID: ${entryId}.`
     );
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
     await clearPendingLeave(userId);
+    if (err instanceof DemoModeBlockedError) {
+      await postToResponseUrl(
+        responseUrl,
+        DEMO_BANNER + `Annual leave for *${leave.startLabel}* noted but nothing was saved to Scoro.`
+      );
+      return;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
     await postToResponseUrl(
       responseUrl,
       `Something went wrong writing leave to Scoro: ${msg}`

@@ -1,6 +1,8 @@
 import "server-only";
 import { scoroPost, toNaiveLondon } from "./matcher";
 import type { ConversationState, DraftEntry } from "./conversation";
+import { assertCanWrite } from "./demo-gate";
+import { PhaseCache, resolveTaskForPhase } from "./scoro-phases";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -27,9 +29,11 @@ export interface WriteResultItem {
   eventTitle: string;
   projectName: string | null;
   durationMinutes: number;
-  action: "created" | "updated" | "skipped" | "failed";
+  action: "created" | "updated" | "skipped" | "skipped_demo" | "failed" | "blocked_phase";
   scoroEntryId: number | null;
+  resolvedTaskId: number | null;
   error: string | null;
+  phaseWarning: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -103,7 +107,8 @@ async function verifyEntryExists(entryId: number): Promise<boolean> {
 async function writeOrUpdateEntry(
   draft: DraftEntry,
   existingEntries: ScoroTimeEntry[],
-  scoroUserId: number
+  scoroUserId: number,
+  phaseCache: PhaseCache
 ): Promise<WriteResultItem> {
   if (!draft.approved || draft.projectId === null || draft.taskId === null) {
     return {
@@ -112,7 +117,9 @@ async function writeOrUpdateEntry(
       durationMinutes: draft.durationMinutes || 0,
       action: "skipped",
       scoroEntryId: null,
+      resolvedTaskId: null,
       error: null,
+      phaseWarning: null,
     };
   }
 
@@ -124,14 +131,61 @@ async function writeOrUpdateEntry(
       durationMinutes: 0,
       action: "skipped",
       scoroEntryId: null,
+      resolvedTaskId: draft.taskId,
       error: "no duration",
+      phaseWarning: null,
     };
   }
 
+  // Phase resolution: determine the correct task for the entry date
+  let resolvedTaskId = draft.taskId;
+  let phaseWarning: string | null = null;
+
+  const entryDate = draft.startDatetime || new Date().toISOString();
+  try {
+    const phaseData = await phaseCache.get(draft.projectId);
+    const resolution = resolveTaskForPhase(
+      draft.taskId,
+      draft.taskTitle || "",
+      phaseData.tasks,
+      phaseData.phases,
+      entryDate
+    );
+
+    resolvedTaskId = resolution.taskId;
+    phaseWarning = resolution.warning;
+
+    if (resolution.blocked) {
+      return {
+        eventTitle: draft.eventTitle,
+        projectName: draft.projectName,
+        durationMinutes: durationMins,
+        action: "blocked_phase",
+        scoroEntryId: null,
+        resolvedTaskId,
+        error: resolution.warning,
+        phaseWarning: resolution.warning,
+      };
+    }
+
+    if (resolution.swapped) {
+      console.log(
+        `[phase] Swapped task for "${draft.eventTitle}": ${draft.taskId} → ${resolution.taskId} (${resolution.taskTitle})`
+      );
+    }
+  } catch (err) {
+    // Phase fetch failed — log and proceed without phase resolution
+    // rather than silently treating the project as unphased
+    console.error(
+      `[phase] Failed to fetch phase data for project ${draft.projectId}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    phaseWarning = "Could not verify phase — phase data fetch failed. Entry logged to the matched task.";
+  }
+
   // Match-and-update: find an existing co-pilot entry for the same task
-  // Only match on task ID (event_id in Scoro) to avoid false matches
+  // Match against the resolved task ID (may have been swapped for phase)
   const existing = existingEntries.find(
-    (e) => e.event_id === draft.taskId && isCopilotEntry(e.description)
+    (e) => e.event_id === resolvedTaskId && isCopilotEntry(e.description)
   );
 
   try {
@@ -161,6 +215,8 @@ async function writeOrUpdateEntry(
           action: "failed",
           scoroEntryId: null,
           error: "Scoro accepted the update but the entry could not be verified afterwards",
+          resolvedTaskId,
+          phaseWarning,
         };
       }
 
@@ -170,7 +226,9 @@ async function writeOrUpdateEntry(
         durationMinutes: totalMins,
         action: "updated",
         scoroEntryId: entryId,
+        resolvedTaskId,
         error: null,
+        phaseWarning,
       };
     }
 
@@ -196,6 +254,8 @@ async function writeOrUpdateEntry(
           action: "failed",
           scoroEntryId: null,
           error: "Scoro accepted the update but the entry could not be verified afterwards",
+          resolvedTaskId,
+          phaseWarning,
         };
       }
 
@@ -205,7 +265,9 @@ async function writeOrUpdateEntry(
         durationMinutes: durationMins,
         action: "updated",
         scoroEntryId: draft.scoroEntryId,
+        resolvedTaskId,
         error: null,
+        phaseWarning,
       };
     }
 
@@ -233,7 +295,7 @@ async function writeOrUpdateEntry(
 
     const res = await scoroPost<Record<string, unknown>>("/timeEntries/modify", {
       request: {
-        event_id: draft.taskId,
+        event_id: resolvedTaskId,
         user_id: scoroUserId,
         start_datetime: startDatetime,
         end_datetime: endDatetime,
@@ -256,6 +318,8 @@ async function writeOrUpdateEntry(
         action: "failed",
         scoroEntryId: null,
         error: "Scoro accepted the write but the entry could not be verified afterwards",
+        resolvedTaskId,
+        phaseWarning,
       };
     }
 
@@ -265,7 +329,9 @@ async function writeOrUpdateEntry(
       durationMinutes: durationMins,
       action: "created",
       scoroEntryId: entryId,
+      resolvedTaskId,
       error: null,
+      phaseWarning,
     };
   } catch (err) {
     return {
@@ -275,6 +341,8 @@ async function writeOrUpdateEntry(
       action: "failed",
       scoroEntryId: null,
       error: err instanceof Error ? err.message : String(err),
+      resolvedTaskId,
+      phaseWarning,
     };
   }
 }
@@ -283,6 +351,7 @@ async function writeOrUpdateEntry(
 // Update an existing Scoro entry in place (used by the "Fix" flow)
 // ---------------------------------------------------------------------------
 export async function updateExistingEntry(
+  slackUserId: string,
   entryId: number,
   updates: {
     taskId?: number;
@@ -291,6 +360,8 @@ export async function updateExistingEntry(
     description?: string;
   }
 ): Promise<void> {
+  await assertCanWrite(slackUserId);
+
   const payload: Record<string, unknown> = {};
 
   if (updates.taskId !== undefined) payload.event_id = updates.taskId;
@@ -307,6 +378,8 @@ export async function finaliseAndWrite(
   convo: ConversationState,
   scoroUserId: number
 ): Promise<WriteResultItem[]> {
+  await assertCanWrite(convo.slackUserId);
+
   const approvedDrafts = convo.drafts.filter(
     (d) => d.approved && d.projectId !== null && d.taskId !== null
   );
@@ -318,17 +391,20 @@ export async function finaliseAndWrite(
   // Fetch existing co-pilot entries for match-and-update
   const existingEntries = await fetchTodayCopilotEntries(scoroUserId);
 
+  // Phase cache: one fetch per project per batch
+  const phaseCache = new PhaseCache();
+
   const results: WriteResultItem[] = [];
   for (const draft of approvedDrafts) {
-    const result = await writeOrUpdateEntry(draft, existingEntries, scoroUserId);
+    const result = await writeOrUpdateEntry(draft, existingEntries, scoroUserId, phaseCache);
     results.push(result);
 
     // If we created/updated an entry, add it to the "existing" list so
     // subsequent drafts for the same task will match-and-update against it
-    if (result.scoroEntryId && result.action !== "skipped" && result.action !== "failed") {
+    if (result.scoroEntryId && result.action !== "skipped" && result.action !== "skipped_demo" && result.action !== "failed") {
       existingEntries.push({
         time_entry_id: result.scoroEntryId,
-        event_id: draft.taskId!,
+        event_id: result.resolvedTaskId ?? draft.taskId!,
         description: `${COPILOT_TAG} ${draft.description}`,
         duration: durationToStr(result.durationMinutes),
       });
