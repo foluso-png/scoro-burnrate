@@ -56,6 +56,14 @@ function isCopilotEntry(description: string | undefined): boolean {
   return description.includes(COPILOT_TAG) || description.includes(COPILOT_DRAFT_TAG);
 }
 
+/** Strip the [Co-pilot] or [Co-pilot draft] prefix to get the raw description body. */
+function copilotDescriptionBody(description: string): string {
+  return description
+    .replace(COPILOT_DRAFT_TAG, "")
+    .replace(COPILOT_TAG, "")
+    .trim();
+}
+
 // ---------------------------------------------------------------------------
 // Fetch today's co-pilot entries for the user
 // ---------------------------------------------------------------------------
@@ -190,9 +198,13 @@ async function writeOrUpdateEntry(
 
   try {
     if (existing) {
-      // Update existing entry: add duration, update description and tag
+      // Same event rewritten (e.g. lunch run then 6pm run) → SET duration.
+      // Different event on the same task (e.g. two separate meetings) → ADD duration.
+      const existingBody = copilotDescriptionBody(existing.description || "");
+      const isSameEvent = existingBody === draft.description.trim();
+
       const existingMins = existing.duration ? parseScoroDuration(existing.duration) : 0;
-      const totalMins = existingMins + durationMins;
+      const totalMins = isSameEvent ? durationMins : existingMins + durationMins;
 
       const entryId = existing.time_entry_id || existing.id!;
       const description = `${COPILOT_TAG} ${draft.description}`;

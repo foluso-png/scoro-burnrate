@@ -8,6 +8,8 @@ import {
   loadConversation,
   saveConversation,
   clearConversation,
+  acquireWriteLock,
+  releaseWriteLock,
   DraftEntry,
 } from "@/lib/conversation";
 import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
@@ -188,50 +190,64 @@ async function handleLooksRight(
     return;
   }
 
-  // Write all approved drafts to Scoro (the slow part)
-  let results: Awaited<ReturnType<typeof finaliseAndWrite>>;
+  // Acquire exclusive write lock — prevents double-tap / Slack retry duplication
+  const gotLock = await acquireWriteLock(userId);
+  if (!gotLock) {
+    await postToResponseUrl(
+      responseUrl,
+      "Your entries are already being written — nothing extra was saved. Give it a moment and you'll see the confirmation above."
+    );
+    return;
+  }
+
   try {
-    results = await finaliseAndWrite(convo, prefs.scoroUserId);
-  } catch (err) {
-    if (err instanceof DemoModeBlockedError) {
-      await saveMemoryForDrafts(userId, approvedDrafts);
-      await clearConversation(userId);
-      const count = approvedDrafts.length;
-      await postToResponseUrl(
-        responseUrl,
-        DEMO_BANNER + `${count} entry${count === 1 ? "" : "s"} matched but nothing was saved to Scoro.`
-      );
-      return;
+    // Write all approved drafts to Scoro (the slow part)
+    let results: Awaited<ReturnType<typeof finaliseAndWrite>>;
+    try {
+      results = await finaliseAndWrite(convo, prefs.scoroUserId);
+    } catch (err) {
+      if (err instanceof DemoModeBlockedError) {
+        await saveMemoryForDrafts(userId, approvedDrafts);
+        await clearConversation(userId);
+        const count = approvedDrafts.length;
+        await postToResponseUrl(
+          responseUrl,
+          DEMO_BANNER + `${count} entry${count === 1 ? "" : "s"} matched but nothing was saved to Scoro.`
+        );
+        return;
+      }
+      throw err;
     }
-    throw err;
-  }
 
-  // Save confirmed event→project mappings for future memory
-  await saveMemoryForDrafts(userId, approvedDrafts);
+    // Save confirmed event→project mappings for future memory
+    await saveMemoryForDrafts(userId, approvedDrafts);
 
-  await clearConversation(userId);
+    await clearConversation(userId);
 
-  const written = results.filter((r) => !r.error && r.action !== "skipped" && r.action !== "skipped_demo" && r.action !== "failed");
-  const failed = results.filter((r) => r.error);
+    const written = results.filter((r) => !r.error && r.action !== "skipped" && r.action !== "skipped_demo" && r.action !== "failed");
+    const failed = results.filter((r) => r.error);
 
-  let summary = `\u2705 Done. ${written.length} entry${written.length === 1 ? "" : "s"} written to Scoro:\n`;
-  summary += written
-    .map(
-      (r) =>
-        `\u2022 ${formatDuration(r.durationMinutes)} ${r.projectName || "unknown"} (${r.action})`
-    )
-    .join("\n");
-
-  if (failed.length > 0) {
-    summary += `\n\n\u26a0\ufe0f ${failed.length} failed:\n`;
-    summary += failed
-      .map((r) => `\u2022 ${r.eventTitle}: ${r.error}`)
+    let summary = `\u2705 Done. ${written.length} entry${written.length === 1 ? "" : "s"} written to Scoro:\n`;
+    summary += written
+      .map(
+        (r) =>
+          `\u2022 ${formatDuration(r.durationMinutes)} ${r.projectName || "unknown"} (${r.action})`
+      )
       .join("\n");
+
+    if (failed.length > 0) {
+      summary += `\n\n\u26a0\ufe0f ${failed.length} failed:\n`;
+      summary += failed
+        .map((r) => `\u2022 ${r.eventTitle}: ${r.error}`)
+        .join("\n");
+    }
+
+    summary += "\n\nAll done. Have a good evening!";
+
+    await postToResponseUrl(responseUrl, summary);
+  } finally {
+    await releaseWriteLock(userId);
   }
-
-  summary += "\n\nAll done. Have a good evening!";
-
-  await postToResponseUrl(responseUrl, summary);
 }
 
 async function handleAddTime(
