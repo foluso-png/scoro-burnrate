@@ -12,6 +12,7 @@ export interface TaskRecord {
   activity_name: string | null;
   status: string;
   assigned_user_ids: number[];
+  project_phase_id: number;
 }
 
 export interface ProjectRecord {
@@ -87,6 +88,7 @@ interface ScoroTask {
   is_completed: number;
   assigned_to?: number;
   related_users?: number[];
+  project_phase_id?: number;
   [key: string]: unknown;
 }
 
@@ -199,6 +201,7 @@ async function fetchProjectTasks(projectId: number): Promise<TaskRecord[]> {
         status: t.status,
         assigned_user_ids:
           t.related_users || (t.assigned_to ? [t.assigned_to] : []),
+        project_phase_id: t.project_phase_id ?? 0,
       });
     }
   }

@@ -24,6 +24,7 @@ import { pickSignOff } from "./sign-off";
 import { loadUserPrefs, saveUserPrefs, todayLondon, DEMO_BANNER } from "./user-prefs";
 import { loadProjectTaskMemory } from "./project-task-memory";
 import { assertCanWrite } from "./demo-gate";
+import { PhaseCache, resolveTaskForPhase } from "./scoro-phases";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -57,6 +58,7 @@ export interface WriteResult {
   confidence: string;
   scoro_entry_id: number | null;
   error: string | null;
+  phaseWarning: string | null;
 }
 
 export interface SummaryResult {
@@ -175,16 +177,58 @@ async function writeDraftsToScoro(
       m.confidence === "low"
   );
 
+  const phaseCache = new PhaseCache();
   const written: WriteResult[] = [];
 
   for (const match of approved) {
     const event = events.find((e) => e.id === match.event_id);
     if (!event) continue;
 
+    // Phase resolution: pick the task on the correct phase for the entry date
+    let resolvedTaskId = match.task_id!;
+    let phaseWarning: string | null = null;
+
+    try {
+      const phaseData = await phaseCache.get(match.project_id!);
+      const resolution = resolveTaskForPhase(
+        match.task_id!,
+        match.task_title || "",
+        phaseData.tasks,
+        phaseData.phases,
+        event.start
+      );
+      resolvedTaskId = resolution.taskId;
+      phaseWarning = resolution.warning;
+
+      if (resolution.blocked) {
+        written.push({
+          event_title: event.title,
+          project_name: match.project_name,
+          task_title: match.task_title,
+          confidence: match.confidence,
+          scoro_entry_id: null,
+          error: resolution.warning,
+          phaseWarning: resolution.warning,
+        });
+        continue;
+      }
+
+      if (resolution.swapped) {
+        console.log(
+          `[phase] Draft: swapped task for "${event.title}": ${match.task_id} → ${resolution.taskId} (${resolution.taskTitle})`
+        );
+      }
+    } catch (err) {
+      console.error(
+        `[phase] Draft: failed to fetch phase data for project ${match.project_id}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      phaseWarning = "Could not verify phase — phase data fetch failed. Entry logged to the matched task.";
+    }
+
     const description = `${COPILOT_TAG} ${match.description}`;
 
     const payload: Record<string, unknown> = {
-      event_id: match.task_id,
+      event_id: resolvedTaskId,
       user_id: scoroUserId,
       start_datetime: toNaiveLondon(event.start),
       end_datetime: toNaiveLondon(event.end),
@@ -207,6 +251,7 @@ async function writeDraftsToScoro(
         confidence: match.confidence,
         scoro_entry_id: entryId,
         error: null,
+        phaseWarning,
       });
     } catch (err) {
       written.push({
@@ -216,6 +261,7 @@ async function writeDraftsToScoro(
         confidence: match.confidence,
         scoro_entry_id: null,
         error: err instanceof Error ? err.message : String(err),
+        phaseWarning,
       });
     }
   }
@@ -357,6 +403,17 @@ function formatSlackBlocks(
   }
 
   let body = `*I matched ${matchCount} event${matchCount === 1 ? "" : "s"} from your calendar:*\n${matchedLines}`;
+
+  // Phase warnings: entries that landed on the wrong phase but were still written.
+  // Blocked entries (BLOCK_WRONG_PHASE=true) have error set and render in the
+  // "Failed to write" section below, so they're excluded here to avoid duplication.
+  const phaseWarnings = written.filter((w) => w.phaseWarning && !w.error);
+  if (phaseWarnings.length > 0) {
+    const warningLines = phaseWarnings
+      .map((w) => `\u2022 ${w.event_title}: ${w.phaseWarning}`)
+      .join("\n");
+    body += `\n\n\u26a0\ufe0f *Phase notes:*\n${warningLines}`;
+  }
 
   // Task-uncertain: project matched but task is a guess (preview mode only)
   const taskUncertainBlocks: Record<string, unknown>[] = [];
