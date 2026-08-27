@@ -95,6 +95,34 @@ export async function clearConversation(slackUserId: string): Promise<void> {
   await redis.del(key(slackUserId));
 }
 
+// ---------------------------------------------------------------------------
+// Write lock — prevents concurrent writes for the same user
+// ---------------------------------------------------------------------------
+const WRITE_LOCK_PREFIX = "writing:";
+const WRITE_LOCK_TTL = 120; // 2 minutes — backstop if the process dies
+
+/**
+ * Attempt to acquire an exclusive write lock for a user.
+ * Returns true if the lock was acquired, false if another write is in progress.
+ */
+export async function acquireWriteLock(slackUserId: string): Promise<boolean> {
+  const redis = await getRedis();
+  const result = await redis.set(
+    `${WRITE_LOCK_PREFIX}${slackUserId}`,
+    Date.now(),
+    { nx: true, ex: WRITE_LOCK_TTL }
+  );
+  return result === "OK";
+}
+
+/**
+ * Release the write lock for a user. Call in a finally block.
+ */
+export async function releaseWriteLock(slackUserId: string): Promise<void> {
+  const redis = await getRedis();
+  await redis.del(`${WRITE_LOCK_PREFIX}${slackUserId}`);
+}
+
 /**
  * Create a fresh conversation state for a user.
  */
