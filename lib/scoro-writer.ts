@@ -245,42 +245,54 @@ async function writeOrUpdateEntry(
     }
 
     // If this draft was already written by the cron (has a scoroEntryId),
-    // update it in place rather than creating a duplicate
+    // update it in place rather than creating a duplicate.
+    // Guard: verify the ID is in today's entries. A stale ID from a previous
+    // day would silently overwrite the wrong entry.
     if (draft.scoroEntryId) {
-      const description = `${COPILOT_TAG} ${draft.description}`;
+      const isCurrentEntry = existingEntries.some(
+        (e) => (e.time_entry_id || e.id) === draft.scoroEntryId
+      );
+      if (!isCurrentEntry) {
+        console.warn(
+          `[stale-id] Rejected draft.scoroEntryId ${draft.scoroEntryId} for "${draft.eventTitle}" (date: ${draft.startDatetime ?? "unknown"}) — not in today's entries. Creating new entry instead.`
+        );
+        // Fall through to the create path below
+      } else {
+        const description = `${COPILOT_TAG} ${draft.description}`;
 
-      await scoroPost(`/timeEntries/modify/${draft.scoroEntryId}`, {
-        request: {
-          description,
-          is_completed: true,
-        },
-      });
+        await scoroPost(`/timeEntries/modify/${draft.scoroEntryId}`, {
+          request: {
+            description,
+            is_completed: true,
+          },
+        });
 
-      // Read-back verification
-      const verified = await verifyEntryExists(draft.scoroEntryId);
-      if (!verified) {
+        // Read-back verification
+        const verified = await verifyEntryExists(draft.scoroEntryId);
+        if (!verified) {
+          return {
+            eventTitle: draft.eventTitle,
+            projectName: draft.projectName,
+            durationMinutes: durationMins,
+            action: "failed",
+            scoroEntryId: null,
+            error: "Scoro accepted the update but the entry could not be verified afterwards",
+            resolvedTaskId,
+            phaseWarning,
+          };
+        }
+
         return {
           eventTitle: draft.eventTitle,
           projectName: draft.projectName,
           durationMinutes: durationMins,
-          action: "failed",
-          scoroEntryId: null,
-          error: "Scoro accepted the update but the entry could not be verified afterwards",
+          action: "updated",
+          scoroEntryId: draft.scoroEntryId,
           resolvedTaskId,
+          error: null,
           phaseWarning,
         };
       }
-
-      return {
-        eventTitle: draft.eventTitle,
-        projectName: draft.projectName,
-        durationMinutes: durationMins,
-        action: "updated",
-        scoroEntryId: draft.scoroEntryId,
-        resolvedTaskId,
-        error: null,
-        phaseWarning,
-      };
     }
 
     // Create new entry

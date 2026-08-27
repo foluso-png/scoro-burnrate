@@ -52,6 +52,7 @@ interface CalendarEvent {
 }
 
 export interface WriteResult {
+  event_id: string;
   event_title: string;
   project_name: string | null;
   task_title: string | null;
@@ -202,6 +203,7 @@ async function writeDraftsToScoro(
 
       if (resolution.blocked) {
         written.push({
+          event_id: match.event_id,
           event_title: event.title,
           project_name: match.project_name,
           task_title: match.task_title,
@@ -245,6 +247,7 @@ async function writeDraftsToScoro(
       const entryId =
         (res.data.time_entry_id as number) || (res.data.id as number);
       written.push({
+        event_id: match.event_id,
         event_title: event.title,
         project_name: match.project_name,
         task_title: match.task_title,
@@ -255,6 +258,7 @@ async function writeDraftsToScoro(
       });
     } catch (err) {
       written.push({
+        event_id: match.event_id,
         event_title: event.title,
         project_name: match.project_name,
         task_title: match.task_title,
@@ -911,10 +915,7 @@ export async function runCopilotSummary(
       remembered: rememberedIds.has(m.event_id),
       taskUncertain: m.task_confident === false && m.project_id !== null && m.confidence !== "low",
       scoroEntryId:
-        written.find(
-          (w) =>
-            w.project_name === m.project_name && w.task_title === m.task_title
-        )?.scoro_entry_id ?? null,
+        written.find((w) => w.event_id === m.event_id)?.scoro_entry_id ?? null,
       durationMinutes: event
         ? Math.round(
             (new Date(event.end).getTime() -
