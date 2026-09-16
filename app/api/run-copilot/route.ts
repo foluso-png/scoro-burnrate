@@ -102,6 +102,7 @@ export async function GET(request: NextRequest) {
       const result: SummaryResult = await runCopilotSummary(slackId, {
         writeToScoro: true,
         projectLookup,
+        stampEmpty: true,
       });
 
       await saveLastRun(slackId, {
