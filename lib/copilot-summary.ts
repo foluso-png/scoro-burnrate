@@ -656,6 +656,7 @@ export async function runCopilotSummary(
     projectLookup?: { projects: ProjectRecord[] }; // pre-fetched lookup to share across users
     targetDate?: Date; // run for a specific past date instead of today
     skipDedupe?: boolean; // bypass the "already sent today" check (used by catch-up)
+    stampEmpty?: boolean; // stamp lastSummarySentDate even when zero events (cron: true, manual: false)
   } = {}
 ): Promise<SummaryResult> {
   const { channelId = slackId, writeToScoro = true } = options;
@@ -723,8 +724,8 @@ export async function runCopilotSummary(
       blocks: emptyBlocks,
     });
 
-    // Stamp today's date to prevent duplicate summaries
-    if (!options.targetDate) {
+    // Stamp today's date to prevent duplicate summaries (only if caller opts in for empty days)
+    if (!options.targetDate && options.stampEmpty) {
       prefs.lastSummarySentDate = today;
       await saveUserPrefs(slackId, prefs);
     }
