@@ -646,6 +646,53 @@ export async function checkWeekSubmitted(
 }
 
 // ---------------------------------------------------------------------------
+// Scoro leave check — query /timeOffs/list for a user on a given date
+// ---------------------------------------------------------------------------
+interface TimeOffDate {
+  date: string;
+  value: number; // -1 = full day, positive = seconds of partial leave
+}
+interface TimeOffUserDates {
+  user_id: number;
+  dates: TimeOffDate[];
+}
+interface TimeOffEntry {
+  id: number;
+  type: string;
+  usersDates: TimeOffUserDates[];
+}
+
+export async function checkScoroTimeOff(
+  dateStr: string,
+  scoroUserId: number
+): Promise<{ onLeave: boolean; partial: boolean; error: boolean }> {
+  try {
+    // date_from/date_to filter is unreliable — filter by user only, check dates client-side
+    const res = await scoroPost<TimeOffEntry[]>("/timeOffs/list", {
+      filter: { user_id: scoroUserId },
+      per_page: 100,
+    });
+    const entries = Array.isArray(res.data) ? res.data : [];
+
+    for (const entry of entries) {
+      for (const ud of entry.usersDates) {
+        if (ud.user_id !== scoroUserId) continue;
+        for (const d of ud.dates) {
+          if (d.date !== dateStr) continue;
+          // value === -1 means full day off; positive means partial (seconds of leave)
+          return { onLeave: true, partial: d.value !== -1, error: false };
+        }
+      }
+    }
+
+    return { onLeave: false, partial: false, error: false };
+  } catch (err) {
+    console.error(`[checkScoroTimeOff] Failed for user ${scoroUserId} on ${dateStr}:`, err);
+    return { onLeave: false, partial: false, error: true };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main summary pipeline
 // ---------------------------------------------------------------------------
 export async function runCopilotSummary(
@@ -657,6 +704,7 @@ export async function runCopilotSummary(
     targetDate?: Date; // run for a specific past date instead of today
     skipDedupe?: boolean; // bypass the "already sent today" check (used by catch-up)
     stampEmpty?: boolean; // stamp lastSummarySentDate even when zero events (cron: true, manual: false)
+    silentLeaveSkip?: boolean; // skip silently (no Slack message) when user is on leave (cron: true, manual: false)
   } = {}
 ): Promise<SummaryResult> {
   const { channelId = slackId, writeToScoro = true } = options;
@@ -696,6 +744,62 @@ export async function runCopilotSummary(
     };
   }
   const scoroUserId = prefs.scoroUserId;
+
+  // 0b. Leave guard — check Scoro time off for the target date
+  const entryDateStr = options.targetDate
+    ? `${options.targetDate.getFullYear()}-${String(options.targetDate.getMonth() + 1).padStart(2, "0")}-${String(options.targetDate.getDate()).padStart(2, "0")}`
+    : today;
+  const leaveCheck = await checkScoroTimeOff(entryDateStr, scoroUserId);
+
+  if (leaveCheck.error) {
+    // Fail closed — don't run the summary if we can't verify leave status
+    const errText = "Couldn't check your leave status in Scoro, so I've held off running your summary to be safe. Try again in a minute, or message Foluso if it keeps happening.";
+    if (!options.silentLeaveSkip) {
+      await postSlackMessage(channelId, {
+        text: errText,
+        blocks: [{ type: "section", text: { type: "mrkdwn", text: errText } }],
+      });
+    }
+    console.error(`[runCopilotSummary] Leave check failed for ${slackId} on ${entryDateStr}, skipping summary`);
+    return {
+      eventCount: 0,
+      matched: 0,
+      failed: 0,
+      skipped: 0,
+      slackStatus: "blocked: leave check failed",
+      written: [],
+      skippedEvents: [],
+    };
+  }
+
+  if (leaveCheck.onLeave && !leaveCheck.partial) {
+    // Full-day leave — skip the summary entirely
+    if (!options.silentLeaveSkip) {
+      const displayDate = options.targetDate
+        ? options.targetDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" })
+        : "today";
+      const leaveText = `You're on leave ${displayDate} — nothing to log. Enjoy your time off!`;
+      await postSlackMessage(channelId, {
+        text: leaveText,
+        blocks: [{ type: "section", text: { type: "mrkdwn", text: leaveText } }],
+      });
+    }
+    // Stamp so the cron doesn't retry later today
+    if (!options.targetDate) {
+      prefs.lastSummarySentDate = today;
+      await saveUserPrefs(slackId, prefs);
+    }
+    console.log(`[runCopilotSummary] ${slackId} is on full-day leave on ${entryDateStr}, skipped`);
+    return {
+      eventCount: 0,
+      matched: 0,
+      failed: 0,
+      skipped: 0,
+      slackStatus: "skipped: on leave",
+      written: [],
+      skippedEvents: [],
+    };
+  }
 
   // 1. Get Google access token
   const accessToken = await getAccessToken(slackId);

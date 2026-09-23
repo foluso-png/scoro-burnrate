@@ -103,6 +103,7 @@ export async function GET(request: NextRequest) {
         writeToScoro: true,
         projectLookup,
         stampEmpty: true,
+        silentLeaveSkip: true,
       });
 
       await saveLastRun(slackId, {
