@@ -14,7 +14,9 @@ import {
   toNaiveLondon,
   MatchResult,
   ProjectRecord,
+  ActivityType,
 } from "./matcher";
+import { loadActivityMemory } from "./activity-memory";
 import {
   loadEventMemory,
   normaliseTitle,
@@ -704,7 +706,7 @@ export async function runCopilotSummary(
   options: {
     channelId?: string; // post to this channel; defaults to slackId (opens DM)
     writeToScoro?: boolean; // write drafts to Scoro; defaults to true
-    projectLookup?: { projects: ProjectRecord[] }; // pre-fetched lookup to share across users
+    projectLookup?: { projects: ProjectRecord[]; activities?: ActivityType[] }; // pre-fetched lookup to share across users
     targetDate?: Date; // run for a specific past date instead of today
     skipDedupe?: boolean; // bypass the "already sent today" check (used by catch-up)
     stampEmpty?: boolean; // stamp lastSummarySentDate even when zero events (cron: true, manual: false)
@@ -900,9 +902,10 @@ export async function runCopilotSummary(
     }
   }
 
+  const activities = lookup.activities || [];
   const aiMatches =
     unmatchedEvents.length > 0
-      ? await matchEvents(unmatchedEvents, activeProjects)
+      ? await matchEvents(unmatchedEvents, activeProjects, activities)
       : [];
   const matches = [...rememberedMatches, ...aiMatches];
 
@@ -944,6 +947,33 @@ export async function runCopilotSummary(
 
     // No match found: mark as uncertain so the user gets a dropdown
     m.task_confident = false;
+  }
+
+  // 4c. Resolve activity types: memory → AI pick → task's own activity_id → null
+  const activityMem = await loadActivityMemory(slackId);
+
+  for (const m of matches) {
+    if (m.project_id === null || m.task_id === null) continue;
+
+    // Check activity memory first
+    const memKey = `${m.project_id}:${m.task_id}`;
+    const remembered = activityMem[memKey];
+    if (remembered) {
+      m.activity_id = remembered.activity_id;
+      m.activity_name = remembered.activity_name;
+      continue;
+    }
+
+    // AI already set activity_id/activity_name? Keep it.
+    if (m.activity_id !== null) continue;
+
+    // Fall back to the task's own activity_id
+    const project = activeProjects.find((p) => p.project_id === m.project_id);
+    const task = project?.tasks.find((t) => t.task_id === m.task_id);
+    if (task?.activity_id) {
+      m.activity_id = task.activity_id;
+      m.activity_name = task.activity_name || null;
+    }
   }
 
   // 5. Optionally write approved drafts to Scoro

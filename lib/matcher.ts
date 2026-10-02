@@ -28,6 +28,13 @@ export interface ProjectRecord {
   tasks: TaskRecord[];
 }
 
+export interface ActivityType {
+  activity_id: number;
+  name: string;
+  group_name: string | null;
+  parent_id: number | null;
+}
+
 export interface MatchResult {
   event_id: string;
   project_id: number | null;
@@ -94,6 +101,17 @@ interface ScoroTask {
   [key: string]: unknown;
 }
 
+interface ScoroActivity {
+  activity_id: number;
+  name: string;
+  parent_id: number;
+  is_group: number;
+  is_active: number;
+}
+
+// Exclude "Client Related" group and its children
+const EXCLUDED_PARENT_ID = 442;
+
 function scoroBaseUrl(): string {
   return `https://${process.env.SCORO_SUBDOMAIN}.scoro.com/api/v2`;
 }
@@ -135,6 +153,7 @@ interface ProjectLookup {
   generated_at: string;
   project_count: number;
   projects: ProjectRecord[];
+  activities: ActivityType[];
 }
 
 async function fetchAllProjects(): Promise<ScoroProject[]> {
@@ -224,6 +243,45 @@ function extractTeam(p: ScoroProject): number[] {
   return [];
 }
 
+async function fetchActivities(): Promise<ActivityType[]> {
+  const res = await scoroPost<ScoroActivity[]>("/activities/list", {
+    per_page: 200,
+  });
+  const all = Array.isArray(res.data) ? res.data : [];
+
+  // Build group name lookup from is_group records
+  const groupNames = new Map<number, string>();
+  for (const a of all) {
+    if (a.is_group === 1) groupNames.set(a.activity_id, a.name);
+  }
+
+  // Collect excluded group IDs (the group itself + any sub-groups)
+  const excludedIds = new Set<number>([EXCLUDED_PARENT_ID]);
+  for (const a of all) {
+    if (a.is_group === 1 && a.parent_id !== 0 && excludedIds.has(a.parent_id)) {
+      excludedIds.add(a.activity_id);
+    }
+  }
+
+  const result = all
+    .filter(
+      (a) =>
+        a.is_group === 0 &&
+        a.is_active === 1 &&
+        !excludedIds.has(a.activity_id) &&
+        (a.parent_id === 0 || !excludedIds.has(a.parent_id))
+    )
+    .map((a) => ({
+      activity_id: a.activity_id,
+      name: a.name,
+      group_name: groupNames.get(a.parent_id) || null,
+      parent_id: a.parent_id || null,
+    }));
+
+  console.log(`[activities] Fetched ${all.length} total, ${result.length} active leaf types after filtering`);
+  return result;
+}
+
 async function buildProjectLookup(): Promise<ProjectLookup> {
   const allProjects = await fetchAllProjects();
 
@@ -246,10 +304,13 @@ async function buildProjectLookup(): Promise<ProjectLookup> {
     r.tasks = await fetchProjectTasks(r.project_id);
   }
 
+  const activities = await fetchActivities();
+
   return {
     generated_at: new Date().toISOString(),
     project_count: records.length,
     projects: records,
+    activities,
   };
 }
 
@@ -384,7 +445,8 @@ export interface FreeTextEntry {
 
 export async function splitAndMatchFreeText(
   text: string,
-  projects: ProjectRecord[]
+  projects: ProjectRecord[],
+  activities: ActivityType[] = []
 ): Promise<FreeTextEntry[]> {
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -396,14 +458,18 @@ export async function splitAndMatchFreeText(
     return `${p.project_id} | ${p.name} | ${p.client_name}\n${taskLines}`;
   });
 
+  const activityBlock = activities.length > 0
+    ? `\nACTIVITY TYPES (activity_id | group | name):\n${activities.map((a) => `${a.activity_id} | ${a.group_name || "(ungrouped)"} | ${a.name}`).join("\n")}\n`
+    : "";
+
   const systemPrompt = `You are a timesheet assistant for Campfire, a social-first marketing agency. You receive a free-text message describing work done today. Your job is to:
 1. Split it into individual activities (if the message describes more than one).
 2. Extract the duration for each activity.
-3. Match each activity to an active project and task.
+3. Match each activity to an active project, task, and activity type.
 
 ACTIVE PROJECTS (project_id | name | client) with their tasks (task_id | title):
 ${projectBlocks.join("\n")}
-
+${activityBlock}
 RULES:
 - Parse durations from the text: "30 mins", "1 hour", "1.5h", "2h30m", "an hour", "half an hour", etc.
 - Do NOT invent durations. If no duration is mentioned for an activity, set durationMinutes to 0.
@@ -412,6 +478,7 @@ RULES:
 - Match each activity to ONE project and ONE task, or null if no good match.
 - Pick the task whose title best fits the activity context.
 - If no task is a strong fit, pick the first available task for that project.
+- Pick the activity_type that best describes the nature of the work. If unsure, set activity_id and activity_name to null.
 - "high" confidence: clear brand/client name match.
 - "medium" confidence: likely match from partial name or context clues.
 - "low" confidence: weak or ambiguous signal.
@@ -421,7 +488,7 @@ RULES:
 - "title": preserve the original activity description for display.
 
 Respond with ONLY a JSON array:
-[{"id":"1","title":"...","durationMinutes":number,"project_id":number|null,"project_name":"..."|null,"client_name":"..."|null,"task_id":number|null,"task_title":"..."|null,"confidence":"high"|"medium"|"low","description":"...","is_internal":boolean}]`;
+[{"id":"1","title":"...","durationMinutes":number,"project_id":number|null,"project_name":"..."|null,"client_name":"..."|null,"task_id":number|null,"task_title":"..."|null,"confidence":"high"|"medium"|"low","description":"...","is_internal":boolean,"activity_id":number|null,"activity_name":"..."|null}]`;
 
   const response = await anthropic.messages.create({
     model: FREE_TEXT_MODEL,
@@ -447,7 +514,8 @@ Respond with ONLY a JSON array:
 // ---------------------------------------------------------------------------
 export async function matchEvents(
   events: MatchInput[],
-  projects: ProjectRecord[]
+  projects: ProjectRecord[],
+  activities: ActivityType[] = []
 ): Promise<MatchResult[]> {
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -459,16 +527,21 @@ export async function matchEvents(
     return `${p.project_id} | ${p.name} | ${p.client_name}\n${taskLines}`;
   });
 
-  const systemPrompt = `You are a timesheet assistant for Campfire, a social-first marketing agency. Match calendar events to active projects AND a specific task within that project.
+  const activityBlock = activities.length > 0
+    ? `\nACTIVITY TYPES (activity_id | group | name):\n${activities.map((a) => `${a.activity_id} | ${a.group_name || "(ungrouped)"} | ${a.name}`).join("\n")}\n`
+    : "";
+
+  const systemPrompt = `You are a timesheet assistant for Campfire, a social-first marketing agency. Match calendar events to active projects, a specific task within that project, and an activity type.
 
 ACTIVE PROJECTS (project_id | name | client) with their tasks (task_id | title):
 ${projectBlocks.join("\n")}
-
+${activityBlock}
 RULES:
 - Match each event to ONE project and ONE task within it, or null if no good match.
 - Pick the task whose title best fits the event context: "creative review" -> a Creative role/task; "shoot brief" -> a Production or Creator Marketing task; "retainer review" -> Account Manager task; vague meetings -> a general/admin task if available.
 - If no task is a strong fit, pick the first available task for that project and set task_confident to false.
 - task_confident: true if the event clearly maps to a specific task (e.g. "creative review" clearly maps to a Creative task). false if the task is a guess because tasks are role-based (e.g. "Senior Account Manager", "Project Manager", "Creative Director") and you cannot tell which role the user holds, or if the event is too generic to distinguish between tasks. Always true when there is only one task on the project.
+- Pick the activity_type from the list above that best describes the nature of the work. Use the group name for context to distinguish similar-sounding types. Only use activity_id and activity_name values that appear in the ACTIVITY TYPES list. If unsure, set both to null.
 - "high" confidence: clear brand/client name match in event title or attendee domain.
 - "medium" confidence: likely match from partial name, context clues, or attendee domain.
 - "low" confidence: weak or ambiguous signal.
@@ -478,7 +551,7 @@ RULES:
 - Description: concise summary for a Scoro time entry.
 
 Respond with ONLY a JSON array. Each element:
-{"event_id":"...","project_id":number|null,"project_name":"..."|null,"client_name":"..."|null,"task_id":number|null,"task_title":"..."|null,"confidence":"high"|"medium"|"low","task_confident":boolean,"description":"...","is_internal":boolean,"is_trackable":boolean,"reasoning":"one sentence"}`;
+{"event_id":"...","project_id":number|null,"project_name":"..."|null,"client_name":"..."|null,"task_id":number|null,"task_title":"..."|null,"confidence":"high"|"medium"|"low","task_confident":boolean,"description":"...","is_internal":boolean,"is_trackable":boolean,"reasoning":"one sentence","activity_id":number|null,"activity_name":"..."|null}`;
 
   const userMessage = JSON.stringify(
     events.map((e) => ({

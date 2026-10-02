@@ -140,7 +140,7 @@ async function handleFreeTextEntry(
   const activeProjects = lookup.projects.filter(
     (p) => p.status === "inprogress"
   );
-  const entries = await splitAndMatchFreeText(text, activeProjects);
+  const entries = await splitAndMatchFreeText(text, activeProjects, lookup.activities || []);
   const withDuration = entries.filter((a) => a.durationMinutes > 0);
 
   if (withDuration.length === 0) {
@@ -437,7 +437,8 @@ async function processFixCorrection(
 
   const matches = await matchEvents(
     [{ id: "fix-1", title: text }],
-    activeProjects
+    activeProjects,
+    lookup.activities || []
   );
 
   const match = matches[0];
