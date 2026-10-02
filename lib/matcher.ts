@@ -244,10 +244,18 @@ function extractTeam(p: ScoroProject): number[] {
 }
 
 async function fetchActivities(): Promise<ActivityType[]> {
-  const res = await scoroPost<ScoroActivity[]>("/activities/list", {
-    per_page: 200,
-  });
-  const all = Array.isArray(res.data) ? res.data : [];
+  const all: ScoroActivity[] = [];
+  let page = 1;
+  while (true) {
+    const res = await scoroPost<ScoroActivity[]>("/activities/list", {
+      per_page: 100,
+      page,
+    });
+    const batch = Array.isArray(res.data) ? res.data : [];
+    all.push(...batch);
+    if (batch.length < 100) break;
+    page++;
+  }
 
   // Build group name lookup from is_group records
   const groupNames = new Map<number, string>();

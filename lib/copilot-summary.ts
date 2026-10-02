@@ -677,13 +677,21 @@ export async function checkScoroTimeOff(
 ): Promise<{ onLeave: boolean; partial: boolean; error: boolean }> {
   try {
     // date_from/date_to filter is unreliable — filter by user only, check dates client-side
-    const res = await scoroPost<TimeOffEntry[]>("/timeOffs/list", {
-      filter: { user_id: scoroUserId },
-      per_page: 100,
-    });
-    const entries = Array.isArray(res.data) ? res.data : [];
+    const allTimeOffs: TimeOffEntry[] = [];
+    let toPage = 1;
+    while (true) {
+      const res = await scoroPost<TimeOffEntry[]>("/timeOffs/list", {
+        filter: { user_id: scoroUserId },
+        per_page: 100,
+        page: toPage,
+      });
+      const batch = Array.isArray(res.data) ? res.data : [];
+      allTimeOffs.push(...batch);
+      if (batch.length < 100) break;
+      toPage++;
+    }
 
-    for (const entry of entries) {
+    for (const entry of allTimeOffs) {
       for (const ud of entry.usersDates) {
         if (ud.user_id !== scoroUserId) continue;
         for (const d of ud.dates) {
