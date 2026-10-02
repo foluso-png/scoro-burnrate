@@ -15,7 +15,7 @@ import {
 import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
 import { runCopilotSummary } from "@/lib/copilot-summary";
 import { saveEventMapping } from "@/lib/event-memory";
-import { getProjectLookup, ActivityType, filterActivitiesForProject } from "@/lib/matcher";
+import { getProjectLookup } from "@/lib/matcher";
 import { saveActivityMapping, loadActivityMemory } from "@/lib/activity-memory";
 import { loadUserPrefs } from "@/lib/user-prefs";
 import {
@@ -777,27 +777,6 @@ async function handleSelectTask(
 // ---------------------------------------------------------------------------
 // Activity type dropdown selection
 // ---------------------------------------------------------------------------
-function buildActivityDropdownOptions(
-  activities: ActivityType[],
-  currentActivityId: number | null
-): {
-  options: { text: { type: "plain_text"; text: string }; value: string }[];
-  initialOption: { text: { type: "plain_text"; text: string }; value: string } | null;
-} {
-  const options = activities.map((a) => ({
-    text: {
-      type: "plain_text" as const,
-      text: `${a.group_name ? `${a.group_name} > ` : ""}${a.name}`.slice(0, 75),
-    },
-    value: `${a.activity_id}:${a.name}`,
-  }));
-  const initialOption =
-    currentActivityId !== null
-      ? options.find((o) => o.value.startsWith(`${currentActivityId}:`)) || null
-      : null;
-  return { options, initialOption };
-}
-
 async function handleSelectActivity(
   userId: string,
   responseUrl: string,
