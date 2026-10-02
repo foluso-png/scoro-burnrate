@@ -241,6 +241,7 @@ async function writeDraftsToScoro(
       duration: durationStr(event.start, event.end),
       description,
       is_completed: false,
+      ...(match.activity_id ? { activity_id: match.activity_id } : {}),
     };
 
     try {
@@ -259,7 +260,7 @@ async function writeDraftsToScoro(
         scoro_entry_id: entryId,
         error: null,
         phaseWarning,
-        activity_name: null,
+        activity_name: match.activity_name || null,
       });
     } catch (err) {
       written.push({

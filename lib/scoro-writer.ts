@@ -214,6 +214,7 @@ async function writeOrUpdateEntry(
           duration: durationToStr(totalMins),
           description,
           is_completed: true,
+          ...(draft.activityId ? { activity_id: draft.activityId } : {}),
         },
       });
 
@@ -264,6 +265,7 @@ async function writeOrUpdateEntry(
           request: {
             description,
             is_completed: true,
+            ...(draft.activityId ? { activity_id: draft.activityId } : {}),
           },
         });
 
@@ -326,6 +328,7 @@ async function writeOrUpdateEntry(
         duration: durationToStr(durationMins),
         description,
         is_completed: true,
+        ...(draft.activityId ? { activity_id: draft.activityId } : {}),
       },
     });
 
@@ -382,6 +385,7 @@ export async function updateExistingEntry(
     projectId?: number;
     durationMinutes?: number;
     description?: string;
+    activityId?: number;
   }
 ): Promise<void> {
   await assertCanWrite(slackUserId);
@@ -391,6 +395,7 @@ export async function updateExistingEntry(
   if (updates.taskId !== undefined) payload.event_id = updates.taskId;
   if (updates.description !== undefined) payload.description = `${COPILOT_TAG} ${updates.description}`;
   if (updates.durationMinutes !== undefined) payload.duration = durationToStr(updates.durationMinutes);
+  if (updates.activityId !== undefined) payload.activity_id = updates.activityId;
 
   await scoroPost(`/timeEntries/modify/${entryId}`, { request: payload });
 }
