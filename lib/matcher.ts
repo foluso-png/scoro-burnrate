@@ -41,6 +41,8 @@ export interface MatchResult {
   is_internal: boolean;
   is_trackable: boolean;
   reasoning: string;
+  activity_id: number | null;
+  activity_name: string | null;
 }
 
 interface MatchInput {
@@ -376,6 +378,8 @@ export interface FreeTextEntry {
   confidence: "high" | "medium" | "low";
   description: string;
   is_internal: boolean;
+  activity_id: number | null;
+  activity_name: string | null;
 }
 
 export async function splitAndMatchFreeText(

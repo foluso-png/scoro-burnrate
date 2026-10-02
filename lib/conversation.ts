@@ -35,6 +35,8 @@ export interface DraftEntry {
   approved: boolean;
   remembered?: boolean;           // true if matched from user's event memory
   taskUncertain?: boolean;        // true if project is matched but task is a guess
+  activityId: number | null;     // Scoro activity_id for reporting
+  activityName: string | null;   // human-readable activity type name
   scoroEntryId: number | null;  // set after cron write
   durationMinutes: number | null; // set for manual entries; calendar entries use event times
   startDatetime: string | null;   // ISO datetime; null for manual entries

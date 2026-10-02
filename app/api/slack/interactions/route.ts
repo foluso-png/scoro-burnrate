@@ -348,6 +348,8 @@ async function handleConfirmEntry(
       durationMinutes: pe.durationMinutes,
       startDatetime: null,
       endDatetime: null,
+      activityId: null,
+      activityName: null,
     };
     convo.drafts.push(draft);
   }

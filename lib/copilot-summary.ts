@@ -60,6 +60,7 @@ export interface WriteResult {
   scoro_entry_id: number | null;
   error: string | null;
   phaseWarning: string | null;
+  activity_name: string | null;
 }
 
 export interface SummaryResult {
@@ -211,6 +212,7 @@ async function writeDraftsToScoro(
           scoro_entry_id: null,
           error: resolution.warning,
           phaseWarning: resolution.warning,
+          activity_name: null,
         });
         continue;
       }
@@ -255,6 +257,7 @@ async function writeDraftsToScoro(
         scoro_entry_id: entryId,
         error: null,
         phaseWarning,
+        activity_name: null,
       });
     } catch (err) {
       written.push({
@@ -266,6 +269,7 @@ async function writeDraftsToScoro(
         scoro_entry_id: null,
         error: err instanceof Error ? err.message : String(err),
         phaseWarning,
+        activity_name: null,
       });
     }
   }
@@ -888,6 +892,8 @@ export async function runCopilotSummary(
         is_internal: ev.isInternal,
         is_trackable: true,
         reasoning: "Matched from user's event memory",
+        activity_id: null,
+        activity_name: null,
       });
     } else {
       unmatchedEvents.push(ev);
@@ -1030,6 +1036,8 @@ export async function runCopilotSummary(
         : null,
       startDatetime: event?.start ?? null,
       endDatetime: event?.end ?? null,
+      activityId: m.activity_id ?? null,
+      activityName: m.activity_name ?? null,
     };
   });
 
