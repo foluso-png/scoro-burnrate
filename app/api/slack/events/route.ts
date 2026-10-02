@@ -18,6 +18,7 @@ import {
   splitAndMatchFreeText,
   classifyEndOfDayIntent,
   ActivityType,
+  filterActivitiesForProject,
 } from "@/lib/matcher";
 import {
   runCopilotSummary,
@@ -367,7 +368,9 @@ async function handleFixText(
       // Show activity dropdown if project and task are set
       if (draft.projectId && draft.taskId) {
         const lookup = await getProjectLookup();
-        const activities = (lookup.activities || []) as ActivityType[];
+        const allActivities = (lookup.activities || []) as ActivityType[];
+        const project = lookup.projects.find((p) => p.project_id === draft.projectId);
+        const activities = filterActivitiesForProject(allActivities, project?.client_name || null);
         if (activities.length > 0) {
           const actOptions = activities.map((a) => ({
             text: {

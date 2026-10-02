@@ -15,7 +15,7 @@ import {
 import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
 import { runCopilotSummary } from "@/lib/copilot-summary";
 import { saveEventMapping } from "@/lib/event-memory";
-import { getProjectLookup, ActivityType } from "@/lib/matcher";
+import { getProjectLookup, ActivityType, filterActivitiesForProject } from "@/lib/matcher";
 import { saveActivityMapping, loadActivityMemory } from "@/lib/activity-memory";
 import { loadUserPrefs } from "@/lib/user-prefs";
 import {

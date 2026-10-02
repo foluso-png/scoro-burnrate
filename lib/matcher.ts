@@ -112,6 +112,34 @@ interface ScoroActivity {
 // Exclude "Client Related" group and its children
 const EXCLUDED_PARENT_ID = 442;
 
+// ---------------------------------------------------------------------------
+// TEMPORARY: Wella activity filter
+// Wella has separate reporting with its own activity groups. Until those are
+// merged into the shared list, Wella projects see only the Wella FY27 groups
+// and all other projects see everything except them.
+// ---------------------------------------------------------------------------
+const WELLA_FY27_GROUP_IDS = new Set([461, 469, 470, 471, 484]);
+
+function isWellaProject(clientName: string): boolean {
+  return clientName.toLowerCase().startsWith("wella");
+}
+
+/**
+ * Filter activity types based on project client.
+ * Wella projects see only Wella FY27 activities; all others see everything
+ * except Wella FY27. Pass clientName = null for unfiltered (AI prompt path).
+ */
+export function filterActivitiesForProject(
+  activities: ActivityType[],
+  clientName: string | null
+): ActivityType[] {
+  if (clientName === null) return activities;
+  if (isWellaProject(clientName)) {
+    return activities.filter((a) => a.parent_id !== null && WELLA_FY27_GROUP_IDS.has(a.parent_id));
+  }
+  return activities.filter((a) => a.parent_id === null || !WELLA_FY27_GROUP_IDS.has(a.parent_id));
+}
+
 function scoroBaseUrl(): string {
   return `https://${process.env.SCORO_SUBDOMAIN}.scoro.com/api/v2`;
 }
@@ -487,6 +515,7 @@ RULES:
 - Pick the task whose title best fits the activity context.
 - If no task is a strong fit, pick the first available task for that project.
 - Pick the activity_type that best describes the nature of the work. If unsure, set activity_id and activity_name to null.
+- Activity types in "Wella FY27" groups (group names starting with "Wella FY27") are ONLY for Wella projects (client name starting with "Wella"). Do not use them for any other client. Non-Wella projects must use activities from the other groups.
 - "high" confidence: clear brand/client name match.
 - "medium" confidence: likely match from partial name or context clues.
 - "low" confidence: weak or ambiguous signal.
@@ -550,6 +579,7 @@ RULES:
 - If no task is a strong fit, pick the first available task for that project and set task_confident to false.
 - task_confident: true if the event clearly maps to a specific task (e.g. "creative review" clearly maps to a Creative task). false if the task is a guess because tasks are role-based (e.g. "Senior Account Manager", "Project Manager", "Creative Director") and you cannot tell which role the user holds, or if the event is too generic to distinguish between tasks. Always true when there is only one task on the project.
 - Pick the activity_type from the list above that best describes the nature of the work. Use the group name for context to distinguish similar-sounding types. Only use activity_id and activity_name values that appear in the ACTIVITY TYPES list. If unsure, set both to null.
+- Activity types in "Wella FY27" groups (group names starting with "Wella FY27") are ONLY for Wella projects (client name starting with "Wella"). Do not use them for any other client. Non-Wella projects must use activities from the other groups.
 - "high" confidence: clear brand/client name match in event title or attendee domain.
 - "medium" confidence: likely match from partial name, context clues, or attendee domain.
 - "low" confidence: weak or ambiguous signal.

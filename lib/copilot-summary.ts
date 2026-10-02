@@ -15,6 +15,7 @@ import {
   MatchResult,
   ProjectRecord,
   ActivityType,
+  filterActivitiesForProject,
 } from "./matcher";
 import { loadActivityMemory } from "./activity-memory";
 import {
@@ -975,8 +976,21 @@ export async function runCopilotSummary(
       continue;
     }
 
-    // AI already set activity_id/activity_name? Keep it.
-    if (m.activity_id !== null) continue;
+    // AI already set activity_id/activity_name — validate against Wella filter
+    if (m.activity_id !== null) {
+      const project = activeProjects.find((p) => p.project_id === m.project_id);
+      const filtered = filterActivitiesForProject(activities, project?.client_name || null);
+      if (!filtered.some((a) => a.activity_id === m.activity_id)) {
+        console.warn(
+          `[activity-filter] Stripped activity ${m.activity_id} ("${m.activity_name}") from "${m.project_name}" (client: ${project?.client_name}) — wrong group for this client`
+        );
+        m.activity_id = null;
+        m.activity_name = null;
+        // Fall through to task fallback below
+      } else {
+        continue;
+      }
+    }
 
     // Fall back to the task's own activity_id
     const project = activeProjects.find((p) => p.project_id === m.project_id);
