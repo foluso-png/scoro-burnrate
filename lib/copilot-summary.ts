@@ -396,8 +396,9 @@ function formatSlackBlocks(
         );
         const event = events.find((e) => match && e.id === match.event_id);
         const time = event ? timeSlot(event.start, event.end) : "";
-        const tag = rememberedIds.has(match?.event_id || "") ? "remembered" : w.confidence;
-        return `\u2022 ${time} ${w.event_title} \u2192 ${w.project_name} (${tag})`;
+        const actSuffix = w.activity_name ? ` · ${w.activity_name}` : "";
+        const tag = rememberedIds.has(match?.event_id || "") ? " (remembered)" : "";
+        return `\u2022 ${time} ${w.event_title} \u2192 ${w.project_name}${actSuffix}${tag}`;
       })
       .join("\n");
   } else {
@@ -407,8 +408,9 @@ function formatSlackBlocks(
         const event = events.find((e) => e.id === m.event_id);
         const time = event ? timeSlot(event.start, event.end) : "";
         const title = event?.title || m.event_id;
-        const tag = rememberedIds.has(m.event_id) ? "remembered" : m.confidence;
-        return `\u2022 ${time} ${title} \u2192 ${m.project_name} (${tag})`;
+        const actSuffix = m.activity_name ? ` · ${m.activity_name}` : "";
+        const tag = rememberedIds.has(m.event_id) ? " (remembered)" : "";
+        return `\u2022 ${time} ${title} \u2192 ${m.project_name}${actSuffix}${tag}`;
       })
       .join("\n");
   }

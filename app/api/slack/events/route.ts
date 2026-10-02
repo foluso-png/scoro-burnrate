@@ -17,6 +17,7 @@ import {
   getProjectLookup,
   splitAndMatchFreeText,
   classifyEndOfDayIntent,
+  ActivityType,
 } from "@/lib/matcher";
 import {
   runCopilotSummary,
@@ -353,17 +354,53 @@ async function handleFixText(
     if (!correction) {
       await saveConversation(convo);
       const draft = convo.drafts[draftIdx];
-      await postSlackReply(
-        channelId,
-        [
-          {
+      const blocks: Record<string, unknown>[] = [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `Fixing *${draft.eventTitle}* (currently \u2192 ${draft.projectName || "unmatched"}${draft.activityName ? ` \u00b7 ${draft.activityName}` : ""}).\n\nWhat's wrong? For example:\n\u2022 _\"should be Garnier social\"_\n\u2022 _\"was actually 45 mins\"_\n\u2022 _\"internal time, not client work\"_`,
+          },
+        },
+      ];
+
+      // Show activity dropdown if project and task are set
+      if (draft.projectId && draft.taskId) {
+        const lookup = await getProjectLookup();
+        const activities = (lookup.activities || []) as ActivityType[];
+        if (activities.length > 0) {
+          const actOptions = activities.map((a) => ({
+            text: {
+              type: "plain_text" as const,
+              text: `${a.group_name ? `${a.group_name} > ` : ""}${a.name}`.slice(0, 75),
+            },
+            value: `${a.activity_id}:${a.name}`,
+          }));
+          const currentOpt = draft.activityId
+            ? actOptions.find((o) => o.value.startsWith(`${draft.activityId}:`)) || null
+            : null;
+          const accessory: Record<string, unknown> = {
+            type: "static_select",
+            action_id: "select_activity",
+            placeholder: { type: "plain_text", text: "Change activity type..." },
+            options: actOptions.slice(0, 100),
+          };
+          if (currentOpt) accessory.initial_option = currentOpt;
+          blocks.push({
             type: "section",
+            block_id: `activity_${draftIdx}`,
             text: {
               type: "mrkdwn",
-              text: `Fixing *${draft.eventTitle}* (currently \u2192 ${draft.projectName || "unmatched"}).\n\nWhat's wrong? For example:\n\u2022 _\"should be Garnier social\"_\n\u2022 _\"was actually 45 mins\"_\n\u2022 _\"internal time, not client work\"_`,
+              text: `*Activity type:* ${draft.activityName || "not set"}`,
             },
-          },
-        ],
+            accessory,
+          });
+        }
+      }
+
+      await postSlackReply(
+        channelId,
+        blocks,
         `Fixing: ${draft.eventTitle}`
       );
       return;
