@@ -14,7 +14,10 @@ import {
   toNaiveLondon,
   MatchResult,
   ProjectRecord,
+  ActivityType,
+  filterActivitiesForProject,
 } from "./matcher";
+import { loadActivityMemory } from "./activity-memory";
 import {
   loadEventMemory,
   normaliseTitle,
@@ -60,6 +63,7 @@ export interface WriteResult {
   scoro_entry_id: number | null;
   error: string | null;
   phaseWarning: string | null;
+  activity_name: string | null;
 }
 
 export interface SummaryResult {
@@ -211,6 +215,7 @@ async function writeDraftsToScoro(
           scoro_entry_id: null,
           error: resolution.warning,
           phaseWarning: resolution.warning,
+          activity_name: null,
         });
         continue;
       }
@@ -237,6 +242,7 @@ async function writeDraftsToScoro(
       duration: durationStr(event.start, event.end),
       description,
       is_completed: false,
+      ...(match.activity_id ? { activity_id: match.activity_id } : {}),
     };
 
     try {
@@ -255,6 +261,7 @@ async function writeDraftsToScoro(
         scoro_entry_id: entryId,
         error: null,
         phaseWarning,
+        activity_name: match.activity_name || null,
       });
     } catch (err) {
       written.push({
@@ -266,6 +273,7 @@ async function writeDraftsToScoro(
         scoro_entry_id: null,
         error: err instanceof Error ? err.message : String(err),
         phaseWarning,
+        activity_name: null,
       });
     }
   }
@@ -389,8 +397,9 @@ function formatSlackBlocks(
         );
         const event = events.find((e) => match && e.id === match.event_id);
         const time = event ? timeSlot(event.start, event.end) : "";
-        const tag = rememberedIds.has(match?.event_id || "") ? "remembered" : w.confidence;
-        return `\u2022 ${time} ${w.event_title} \u2192 ${w.project_name} (${tag})`;
+        const actSuffix = w.activity_name ? ` · ${w.activity_name}` : "";
+        const tag = rememberedIds.has(match?.event_id || "") ? " (remembered)" : "";
+        return `\u2022 ${time} ${w.event_title} \u2192 ${w.project_name}${actSuffix}${tag}`;
       })
       .join("\n");
   } else {
@@ -400,8 +409,9 @@ function formatSlackBlocks(
         const event = events.find((e) => e.id === m.event_id);
         const time = event ? timeSlot(event.start, event.end) : "";
         const title = event?.title || m.event_id;
-        const tag = rememberedIds.has(m.event_id) ? "remembered" : m.confidence;
-        return `\u2022 ${time} ${title} \u2192 ${m.project_name} (${tag})`;
+        const actSuffix = m.activity_name ? ` · ${m.activity_name}` : "";
+        const tag = rememberedIds.has(m.event_id) ? " (remembered)" : "";
+        return `\u2022 ${time} ${title} \u2192 ${m.project_name}${actSuffix}${tag}`;
       })
       .join("\n");
   }
@@ -668,13 +678,21 @@ export async function checkScoroTimeOff(
 ): Promise<{ onLeave: boolean; partial: boolean; error: boolean }> {
   try {
     // date_from/date_to filter is unreliable — filter by user only, check dates client-side
-    const res = await scoroPost<TimeOffEntry[]>("/timeOffs/list", {
-      filter: { user_id: scoroUserId },
-      per_page: 100,
-    });
-    const entries = Array.isArray(res.data) ? res.data : [];
+    const allTimeOffs: TimeOffEntry[] = [];
+    let toPage = 1;
+    while (true) {
+      const res = await scoroPost<TimeOffEntry[]>("/timeOffs/list", {
+        filter: { user_id: scoroUserId },
+        per_page: 100,
+        page: toPage,
+      });
+      const batch = Array.isArray(res.data) ? res.data : [];
+      allTimeOffs.push(...batch);
+      if (batch.length < 100) break;
+      toPage++;
+    }
 
-    for (const entry of entries) {
+    for (const entry of allTimeOffs) {
       for (const ud of entry.usersDates) {
         if (ud.user_id !== scoroUserId) continue;
         for (const d of ud.dates) {
@@ -700,7 +718,7 @@ export async function runCopilotSummary(
   options: {
     channelId?: string; // post to this channel; defaults to slackId (opens DM)
     writeToScoro?: boolean; // write drafts to Scoro; defaults to true
-    projectLookup?: { projects: ProjectRecord[] }; // pre-fetched lookup to share across users
+    projectLookup?: { projects: ProjectRecord[]; activities?: ActivityType[] }; // pre-fetched lookup to share across users
     targetDate?: Date; // run for a specific past date instead of today
     skipDedupe?: boolean; // bypass the "already sent today" check (used by catch-up)
     stampEmpty?: boolean; // stamp lastSummarySentDate even when zero events (cron: true, manual: false)
@@ -888,15 +906,18 @@ export async function runCopilotSummary(
         is_internal: ev.isInternal,
         is_trackable: true,
         reasoning: "Matched from user's event memory",
+        activity_id: null,
+        activity_name: null,
       });
     } else {
       unmatchedEvents.push(ev);
     }
   }
 
+  const activities = lookup.activities || [];
   const aiMatches =
     unmatchedEvents.length > 0
-      ? await matchEvents(unmatchedEvents, activeProjects)
+      ? await matchEvents(unmatchedEvents, activeProjects, activities)
       : [];
   const matches = [...rememberedMatches, ...aiMatches];
 
@@ -938,6 +959,46 @@ export async function runCopilotSummary(
 
     // No match found: mark as uncertain so the user gets a dropdown
     m.task_confident = false;
+  }
+
+  // 4c. Resolve activity types: memory → AI pick → task's own activity_id → null
+  const activityMem = await loadActivityMemory(slackId);
+
+  for (const m of matches) {
+    if (m.project_id === null || m.task_id === null) continue;
+
+    // Check activity memory first
+    const memKey = `${m.project_id}:${m.task_id}`;
+    const remembered = activityMem[memKey];
+    if (remembered) {
+      m.activity_id = remembered.activity_id;
+      m.activity_name = remembered.activity_name;
+      continue;
+    }
+
+    // AI already set activity_id/activity_name — validate against Wella filter
+    if (m.activity_id !== null) {
+      const project = activeProjects.find((p) => p.project_id === m.project_id);
+      const filtered = filterActivitiesForProject(activities, project?.client_name || null);
+      if (!filtered.some((a) => a.activity_id === m.activity_id)) {
+        console.warn(
+          `[activity-filter] Stripped activity ${m.activity_id} ("${m.activity_name}") from "${m.project_name}" (client: ${project?.client_name}) — wrong group for this client`
+        );
+        m.activity_id = null;
+        m.activity_name = null;
+        // Fall through to task fallback below
+      } else {
+        continue;
+      }
+    }
+
+    // Fall back to the task's own activity_id
+    const project = activeProjects.find((p) => p.project_id === m.project_id);
+    const task = project?.tasks.find((t) => t.task_id === m.task_id);
+    if (task?.activity_id) {
+      m.activity_id = task.activity_id;
+      m.activity_name = task.activity_name || null;
+    }
   }
 
   // 5. Optionally write approved drafts to Scoro
@@ -1030,6 +1091,8 @@ export async function runCopilotSummary(
         : null,
       startDatetime: event?.start ?? null,
       endDatetime: event?.end ?? null,
+      activityId: m.activity_id ?? null,
+      activityName: m.activity_name ?? null,
     };
   });
 

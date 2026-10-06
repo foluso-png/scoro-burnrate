@@ -16,6 +16,7 @@ import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
 import { runCopilotSummary } from "@/lib/copilot-summary";
 import { saveEventMapping } from "@/lib/event-memory";
 import { getProjectLookup } from "@/lib/matcher";
+import { saveActivityMapping, loadActivityMemory } from "@/lib/activity-memory";
 import { loadUserPrefs } from "@/lib/user-prefs";
 import {
   loadProjectTaskMemory,
@@ -348,6 +349,8 @@ async function handleConfirmEntry(
       durationMinutes: pe.durationMinutes,
       startDatetime: null,
       endDatetime: null,
+      activityId: null,
+      activityName: null,
     };
     convo.drafts.push(draft);
   }
@@ -771,6 +774,75 @@ async function handleSelectTask(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Activity type dropdown selection
+// ---------------------------------------------------------------------------
+async function handleSelectActivity(
+  userId: string,
+  responseUrl: string,
+  blockId: string,
+  selectedValue: string
+): Promise<void> {
+  const convo = await loadConversation(userId);
+  if (!convo) {
+    await postToResponseUrl(responseUrl, "No active session found.");
+    return;
+  }
+
+  // blockId is "activity_0", "activity_1", etc.
+  const draftIdx = parseInt(blockId.replace("activity_", ""), 10);
+  if (isNaN(draftIdx) || draftIdx >= convo.drafts.length) {
+    await postToResponseUrl(responseUrl, "Could not identify the entry.");
+    return;
+  }
+
+  const [actIdStr, ...nameParts] = selectedValue.split(":");
+  const activityId = parseInt(actIdStr, 10);
+  const activityName = nameParts.join(":");
+  if (isNaN(activityId)) {
+    await postToResponseUrl(responseUrl, "Invalid activity selection.");
+    return;
+  }
+
+  const draft = convo.drafts[draftIdx];
+  convo.drafts[draftIdx] = {
+    ...draft,
+    activityId,
+    activityName,
+  };
+  await saveConversation(convo);
+
+  // Save to activity memory for future entries
+  if (draft.projectId && draft.taskId) {
+    await saveActivityMapping(
+      userId,
+      draft.projectId,
+      draft.taskId,
+      activityId,
+      activityName
+    );
+  }
+
+  // Also update the Scoro entry if it's already been written
+  if (draft.scoroEntryId) {
+    try {
+      await updateExistingEntry(userId, draft.scoroEntryId, {
+        activityId,
+      });
+    } catch (err) {
+      console.error(
+        `Failed to update activity on Scoro entry ${draft.scoroEntryId}:`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  }
+
+  await postResponseWithButtons(
+    responseUrl,
+    `Updated *${draft.eventTitle}* activity to *${activityName}*. Saved for next time.`
+  );
+}
+
 async function handleWrapUp(
   userId: string,
   responseUrl: string,
@@ -970,6 +1042,18 @@ export async function POST(request: NextRequest) {
             responseUrl,
             taskBlockId,
             taskValue
+          );
+          break;
+        }
+        case "select_activity": {
+          const actBlockId = actions[0].block_id || "";
+          const actValue =
+            actions[0].selected_option?.value || "";
+          await handleSelectActivity(
+            userId,
+            responseUrl,
+            actBlockId,
+            actValue
           );
           break;
         }
