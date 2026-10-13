@@ -213,7 +213,7 @@ async function handleLooksRight(
         const count = approvedDrafts.length;
         await postToResponseUrl(
           responseUrl,
-          DEMO_BANNER + `${count} entry${count === 1 ? "" : "s"} matched but nothing was saved to Scoro.`
+          DEMO_BANNER + `${count} ${count === 1 ? "entry" : "entries"} matched but nothing was saved to Scoro.`
         );
         return;
       }
@@ -228,7 +228,7 @@ async function handleLooksRight(
     const written = results.filter((r) => !r.error && r.action !== "skipped" && r.action !== "skipped_demo" && r.action !== "failed");
     const failed = results.filter((r) => r.error);
 
-    let summary = `\u2705 Done. ${written.length} entry${written.length === 1 ? "" : "s"} written to Scoro:\n`;
+    let summary = `\u2705 Done. ${written.length} ${written.length === 1 ? "entry" : "entries"} written to Scoro:\n`;
     summary += written
       .map(
         (r) =>
