@@ -375,7 +375,7 @@ async function handleFixText(
           const actOptions = activities.map((a) => ({
             text: {
               type: "plain_text" as const,
-              text: `${a.group_name ? `${a.group_name} > ` : ""}${a.name}`.slice(0, 75),
+              text: `${a.name}${a.group_name ? ` (${a.group_name})` : ""}`.slice(0, 75),
             },
             value: `${a.activity_id}:${a.name}`,
           }));
