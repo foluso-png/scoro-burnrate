@@ -859,7 +859,7 @@ async function handleForget(
       reply += ` (was: ${mapping.task_title})`;
     }
     if (removedEvents.length > 0) {
-      reply += `. Also cleared ${removedEvents.length} event memory${removedEvents.length === 1 ? "" : "s"} for that project`;
+      reply += `. Also cleared ${removedEvents.length} ${removedEvents.length === 1 ? "event memory" : "event memories"} for that project`;
     }
     reply += ". I'll ask you again next time it comes up.";
 
@@ -1484,7 +1484,7 @@ async function handleDoneConfirm(
         const count = approvedDrafts.length;
         await postSlackReply(
           channelId,
-          [{ type: "section", text: { type: "mrkdwn", text: DEMO_BANNER + `${count} entry${count === 1 ? "" : "s"} matched but nothing was saved to Scoro.` } }],
+          [{ type: "section", text: { type: "mrkdwn", text: DEMO_BANNER + `${count} ${count === 1 ? "entry" : "entries"} matched but nothing was saved to Scoro.` } }],
           "Demo mode — nothing saved"
         );
         return;
@@ -1508,7 +1508,7 @@ async function handleDoneConfirm(
     const written = results.filter((r) => !r.error && r.action !== "skipped" && r.action !== "skipped_demo" && r.action !== "failed");
     const failed = results.filter((r) => r.error);
 
-    let summary = `\u2705 Done. ${written.length} entry${written.length === 1 ? "" : "s"} written to Scoro:\n`;
+    let summary = `\u2705 Done. ${written.length} ${written.length === 1 ? "entry" : "entries"} written to Scoro:\n`;
     summary += written
       .map(
         (r) =>
