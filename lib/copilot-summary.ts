@@ -16,6 +16,7 @@ import {
   ProjectRecord,
   ActivityType,
   filterActivitiesForProject,
+  taskMatchesRole,
 } from "./matcher";
 import { loadActivityMemory } from "./activity-memory";
 import {
@@ -943,11 +944,10 @@ export async function runCopilotSummary(
       }
     }
 
-    // Second: try exact defaultRole match
+    // Second: try defaultRole match (exact or either half of "A - B" titles)
     if (prefs.defaultRole) {
-      const roleLower = prefs.defaultRole.toLowerCase();
       const roleTask = project.tasks.find(
-        (t) => t.title.toLowerCase() === roleLower
+        (t) => taskMatchesRole(t.title, prefs.defaultRole!)
       );
       if (roleTask) {
         m.task_id = roleTask.task_id;

@@ -218,6 +218,27 @@ function deduplicateTaskTitle(name: string): string {
   return name;
 }
 
+/**
+ * Match a task title against a user's default role.
+ * Handles "Role A - Role B" titles (exact match on either half)
+ * and strips trailing parentheticals like "(June 2026)" from both sides.
+ */
+export function taskMatchesRole(taskTitle: string, role: string): boolean {
+  const roleLower = role.toLowerCase();
+  const titleLower = taskTitle.toLowerCase();
+
+  if (titleLower === roleLower) return true;
+
+  const idx = taskTitle.indexOf(" - ");
+  if (idx === -1) return false;
+
+  const strip = (s: string) => s.trim().toLowerCase().replace(/\s*\(.*\)$/, "");
+  const left = strip(taskTitle.slice(0, idx));
+  const right = strip(taskTitle.slice(idx + 3));
+
+  return left === roleLower || right === roleLower;
+}
+
 async function fetchProjectTasks(projectId: number): Promise<TaskRecord[]> {
   const allTasks: ScoroTask[] = [];
   let page = 1;

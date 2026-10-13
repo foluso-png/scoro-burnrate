@@ -15,7 +15,7 @@ import {
 import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
 import { runCopilotSummary } from "@/lib/copilot-summary";
 import { saveEventMapping } from "@/lib/event-memory";
-import { getProjectLookup } from "@/lib/matcher";
+import { getProjectLookup, taskMatchesRole } from "@/lib/matcher";
 import { saveActivityMapping, loadActivityMemory } from "@/lib/activity-memory";
 import { loadUserPrefs } from "@/lib/user-prefs";
 import {
@@ -587,13 +587,12 @@ async function handleSelectProject(
     }
   }
 
-  // 2. Check defaultRole
+  // 2. Check defaultRole (exact or either half of "A - B" titles)
   if (!taskConfident && project.tasks.length > 1) {
     const prefs = await loadUserPrefs(userId);
     if (prefs.defaultRole) {
-      const roleLower = prefs.defaultRole.toLowerCase();
       const roleMatch = project.tasks.find(
-        (t) => t.title.toLowerCase().includes(roleLower)
+        (t) => taskMatchesRole(t.title, prefs.defaultRole!)
       );
       if (roleMatch) {
         resolvedTask = roleMatch;
