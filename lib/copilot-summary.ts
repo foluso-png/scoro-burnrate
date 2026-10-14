@@ -369,27 +369,10 @@ function formatSlackBlocks(
   );
   const successfulWrites = written.filter((w) => !w.error);
   const displayItems = didWrite ? successfulWrites : [];
-  const hasMatches = didWrite
-    ? successfulWrites.length > 0
-    : approvedMatches.length > 0;
-
-  if (!hasMatches) {
-    const text = `\ud83d\udc4b Here's your end-of-day summary \u2014 ${today}\n\nQuiet day on the calendar. Nothing to log, but you can add time manually below.`;
-    return {
-      text,
-      blocks: [
-        { type: "section", text: { type: "mrkdwn", text } },
-        buildSummaryActionButtons(),
-      ],
-    };
-  }
-
-  let matchedLines: string;
-  let matchCount: number;
+  let body: string;
 
   if (didWrite && displayItems.length > 0) {
-    matchCount = displayItems.length;
-    matchedLines = displayItems
+    const matchedLines = displayItems
       .map((w) => {
         const match = matches.find(
           (m) =>
@@ -403,9 +386,9 @@ function formatSlackBlocks(
         return `\u2022 ${time} ${w.event_title} \u2192 ${w.project_name}${actSuffix}${tag}`;
       })
       .join("\n");
-  } else {
-    matchCount = approvedMatches.length;
-    matchedLines = approvedMatches
+    body = `*I matched ${displayItems.length} ${displayItems.length === 1 ? "event" : "events"} from your calendar:*\n${matchedLines}`;
+  } else if (approvedMatches.length > 0) {
+    const matchedLines = approvedMatches
       .map((m) => {
         const event = events.find((e) => e.id === m.event_id);
         const time = event ? timeSlot(event.start, event.end) : "";
@@ -415,9 +398,12 @@ function formatSlackBlocks(
         return `\u2022 ${time} ${title} \u2192 ${m.project_name}${actSuffix}${tag}`;
       })
       .join("\n");
+    body = `*I matched ${approvedMatches.length} ${approvedMatches.length === 1 ? "event" : "events"} from your calendar:*\n${matchedLines}`;
+  } else if (skipped.length > 0) {
+    body = `I found ${events.length} ${events.length === 1 ? "event" : "events"} on your calendar but couldn't match ${events.length === 1 ? "it" : "any of them"} to a project automatically.`;
+  } else {
+    body = "Quiet day on the calendar. Nothing to log, but you can add time manually below.";
   }
-
-  let body = `*I matched ${matchCount} event${matchCount === 1 ? "" : "s"} from your calendar:*\n${matchedLines}`;
 
   // Phase warnings: entries that landed on the wrong phase but were still written.
   // Blocked entries (BLOCK_WRONG_PHASE=true) have error set and render in the
@@ -506,6 +492,14 @@ function formatSlackBlocks(
         },
       });
     }
+  } else if (uncertain.length > 0 && activeProjects.length === 0) {
+    const names = uncertain
+      .map((s) => {
+        const event = events.find((e) => e.id === s.event_id);
+        return event ? event.title : s.event_id;
+      })
+      .join(", ");
+    body += `\n\n*Could not load your project list,* so nothing could be matched to Scoro. Your events are still here: ${names}.\n\nTry again in a few minutes, and if it keeps happening let Foluso know.`;
   } else if (uncertain.length > 0) {
     const names = uncertain
       .map((s) => {
@@ -1049,8 +1043,8 @@ export async function runCopilotSummary(
     blocks: finalBlocks,
   });
 
-  // 6c. Stamp today's date to prevent duplicate summaries
-  if (!options.targetDate) {
+  // 6c. Stamp today's date to prevent duplicate summaries (skip in demo mode so user can re-run)
+  if (!options.targetDate && !prefs.demoMode) {
     prefs.lastSummarySentDate = today;
     await saveUserPrefs(slackId, prefs);
   }
