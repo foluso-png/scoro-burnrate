@@ -239,6 +239,27 @@ export function taskMatchesRole(taskTitle: string, role: string): boolean {
   return left === roleLower || right === roleLower;
 }
 
+/**
+ * Validate an AI-returned task_id against the real project task list.
+ * If the task_id exists, overwrite task_title with the real title.
+ * If not, null out both fields so downstream treats it as unmatched.
+ */
+function validateTask<T extends { project_id: number | null; task_id: number | null; task_title: string | null }>(
+  entry: T,
+  projects: ProjectRecord[]
+): T {
+  if (entry.project_id === null || entry.task_id === null) return entry;
+  const project = projects.find((p) => p.project_id === entry.project_id);
+  if (!project) {
+    return { ...entry, project_id: null, task_id: null, task_title: null };
+  }
+  const task = project.tasks.find((t) => t.task_id === entry.task_id);
+  if (!task) {
+    return { ...entry, task_id: null, task_title: null };
+  }
+  return { ...entry, task_title: task.title };
+}
+
 async function fetchProjectTasks(projectId: number): Promise<TaskRecord[]> {
   const allTasks: ScoroTask[] = [];
   let page = 1;
@@ -561,10 +582,10 @@ Respond with ONLY a JSON array:
   if (!jsonMatch) return [];
 
   const entries: FreeTextEntry[] = JSON.parse(jsonMatch[0]);
-  return entries.map((e, i) => ({
+  return entries.map((e, i) => validateTask({
     ...e,
     id: `manual-${i + 1}`,
-  }));
+  }, projects));
 }
 
 // ---------------------------------------------------------------------------
@@ -629,7 +650,7 @@ Respond with ONLY a JSON array. Each element:
   });
 
   const firstAttempt = parseMatchResponse(response);
-  if (firstAttempt) return firstAttempt;
+  if (firstAttempt) return firstAttempt.map((m) => validateTask(m, projects));
 
   // Retry once with a stricter JSON-only instruction
   console.warn(
@@ -645,7 +666,7 @@ Respond with ONLY a JSON array. Each element:
   });
 
   const retryAttempt = parseMatchResponse(retry);
-  if (retryAttempt) return retryAttempt;
+  if (retryAttempt) return retryAttempt.map((m) => validateTask(m, projects));
 
   throw new Error(
     "Could not match your calendar events after two attempts. Please try again in a minute, or message Foluso if it keeps happening."
