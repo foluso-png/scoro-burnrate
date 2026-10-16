@@ -35,6 +35,7 @@ import { loadUserPrefs, saveUserPrefs, todayLondon, isDemoMode, DEMO_BANNER } fr
 import { CAMPFIRE_ROLES } from "@/lib/roles";
 import { savePendingLeave } from "@/lib/pending-leave";
 import { DemoModeBlockedError } from "@/lib/demo-gate";
+import { PhaseCache, resolveTaskForPhase } from "@/lib/scoro-phases";
 import {
   loadProjectTaskMemory,
   deleteProjectTaskMapping,
@@ -514,6 +515,35 @@ async function processFixCorrection(
     description: match?.description ?? draft.description,
     isInternal: match?.is_internal ?? false,
   };
+
+  // Phase resolution: swap to correct phase for the entry date
+  let fixPhaseWarning: string | null = null;
+  const entryDate = draft.startDatetime;
+  if (convo.pendingEntry.projectId && convo.pendingEntry.taskId && entryDate) {
+    try {
+      const pc = new PhaseCache();
+      const phaseData = await pc.get(convo.pendingEntry.projectId);
+      const resolution = resolveTaskForPhase(
+        convo.pendingEntry.taskId,
+        convo.pendingEntry.taskTitle || "",
+        phaseData.tasks,
+        phaseData.phases,
+        entryDate
+      );
+      if (resolution.swapped) {
+        convo.pendingEntry.taskId = resolution.taskId;
+        convo.pendingEntry.taskTitle = resolution.taskTitle;
+      }
+      if (resolution.blocked) {
+        convo.pendingEntry.taskId = null;
+        convo.pendingEntry.taskTitle = null;
+      }
+      fixPhaseWarning = resolution.warning;
+    } catch (err) {
+      fixPhaseWarning = `Could not verify phase: ${err instanceof Error ? err.message : "fetch failed"}. Entry may land on the wrong phase.`;
+    }
+  }
+
   convo.step = "fixing";
   convo.slackChannelId = channelId;
   await saveConversation(convo);
@@ -538,6 +568,9 @@ async function processFixCorrection(
   if (match?.confidence === "low") {
     confirmText +=
       "\n\n\u26a0\ufe0f Low confidence match. Please check the project is correct.";
+  }
+  if (fixPhaseWarning) {
+    confirmText += `\n\n\u26a0\ufe0f ${fixPhaseWarning}`;
   }
   confirmText += "\n\nCorrect?";
 
