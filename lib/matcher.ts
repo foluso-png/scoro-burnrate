@@ -50,6 +50,7 @@ export interface MatchResult {
   reasoning: string;
   activity_id: number | null;
   activity_name: string | null;
+  phase_warning?: string | null;
 }
 
 interface MatchInput {

@@ -28,6 +28,7 @@ import {
 } from "@/lib/pending-leave";
 import { scoroPost } from "@/lib/matcher";
 import { assertCanWrite, DemoModeBlockedError } from "@/lib/demo-gate";
+import { PhaseCache, resolveTaskForPhase } from "@/lib/scoro-phases";
 import { isDemoMode, DEMO_BANNER } from "@/lib/user-prefs";
 
 // ---------------------------------------------------------------------------
@@ -571,7 +572,7 @@ async function handleSelectProject(
   }
 
   // Task resolution: memory > defaultRole > single task > ask
-  let resolvedTask = project.tasks[0] || null;
+  let resolvedTask: (typeof project.tasks)[number] | null = project.tasks[0] || null;
   let taskConfident = project.tasks.length <= 1;
 
   // 1. Check project-task memory
@@ -598,6 +599,36 @@ async function handleSelectProject(
         resolvedTask = roleMatch;
         taskConfident = true;
       }
+    }
+  }
+
+  // 2b. Phase resolution: swap to correct phase for the entry date
+  let phaseWarning: string | null = null;
+  if (taskConfident && resolvedTask && draft.startDatetime) {
+    try {
+      const pc = new PhaseCache();
+      const phaseData = await pc.get(projectId);
+      const resolution = resolveTaskForPhase(
+        resolvedTask.task_id,
+        resolvedTask.title,
+        phaseData.tasks,
+        phaseData.phases,
+        draft.startDatetime
+      );
+      if (resolution.swapped) {
+        resolvedTask = {
+          ...resolvedTask,
+          task_id: resolution.taskId,
+          title: resolution.taskTitle,
+        };
+      }
+      if (resolution.blocked) {
+        resolvedTask = null;
+        taskConfident = false;
+      }
+      phaseWarning = resolution.warning;
+    } catch (err) {
+      phaseWarning = `Could not verify phase: ${err instanceof Error ? err.message : "fetch failed"}. Entry may land on the wrong phase.`;
     }
   }
 
@@ -697,10 +728,11 @@ async function handleSelectProject(
   const dur = draft.durationMinutes
     ? formatDuration(draft.durationMinutes)
     : "";
-  await postResponseWithButtons(
-    responseUrl,
-    `Matched *${draft.eventTitle}* ${dur ? `(${dur}) ` : ""}\u2192 *${project.name}* (${resolvedTask?.title || "default task"}). Saved for next time.`
-  );
+  let confirmMsg = `Matched *${draft.eventTitle}* ${dur ? `(${dur}) ` : ""}\u2192 *${project.name}* (${resolvedTask?.title || "default task"}). Saved for next time.`;
+  if (phaseWarning) {
+    confirmMsg += `\n\u26a0\ufe0f ${phaseWarning}`;
+  }
+  await postResponseWithButtons(responseUrl, confirmMsg);
 }
 
 // ---------------------------------------------------------------------------
@@ -744,10 +776,39 @@ async function handleSelectTask(
     : null;
   const task = project?.tasks.find((t) => t.task_id === taskId) || null;
 
+  // Phase resolution: swap to correct phase for the entry date
+  let resolvedTaskId = taskId;
+  let resolvedTaskTitle = task?.title || draft.taskTitle;
+  let taskPhaseWarning: string | null = null;
+  if (draft.projectId && draft.startDatetime) {
+    try {
+      const pc = new PhaseCache();
+      const phaseData = await pc.get(draft.projectId);
+      const resolution = resolveTaskForPhase(
+        taskId,
+        resolvedTaskTitle || "",
+        phaseData.tasks,
+        phaseData.phases,
+        draft.startDatetime
+      );
+      if (resolution.swapped) {
+        resolvedTaskId = resolution.taskId;
+        resolvedTaskTitle = resolution.taskTitle;
+      }
+      if (resolution.blocked) {
+        resolvedTaskId = taskId; // keep original; warning tells user why
+        resolvedTaskTitle = task?.title || draft.taskTitle;
+      }
+      taskPhaseWarning = resolution.warning;
+    } catch (err) {
+      taskPhaseWarning = `Could not verify phase: ${err instanceof Error ? err.message : "fetch failed"}. Entry may land on the wrong phase.`;
+    }
+  }
+
   convo.drafts[draftIdx] = {
     ...draft,
-    taskId,
-    taskTitle: task?.title || draft.taskTitle,
+    taskId: resolvedTaskId,
+    taskTitle: resolvedTaskTitle,
     taskUncertain: false,
   };
   await saveConversation(convo);
@@ -757,20 +818,21 @@ async function handleSelectTask(
     await saveEventMapping(userId, draft.eventTitle, {
       project_id: draft.projectId,
       project_name: draft.projectName || "",
-      task_id: taskId,
-      task_title: task?.title || null,
+      task_id: resolvedTaskId,
+      task_title: resolvedTaskTitle || null,
     });
   }
 
   // Remember this task choice for all future entries on this project
   if (draft.projectId && task) {
-    await saveProjectTaskMapping(userId, draft.projectId, taskId, task.title);
+    await saveProjectTaskMapping(userId, draft.projectId, resolvedTaskId, resolvedTaskTitle || task.title);
   }
 
-  await postResponseWithButtons(
-    responseUrl,
-    `Updated *${draft.eventTitle}* task to *${task?.title || "unknown"}*. Saved for next time.`
-  );
+  let taskConfirmMsg = `Updated *${draft.eventTitle}* task to *${resolvedTaskTitle || "unknown"}*. Saved for next time.`;
+  if (taskPhaseWarning) {
+    taskConfirmMsg += `\n\u26a0\ufe0f ${taskPhaseWarning}`;
+  }
+  await postResponseWithButtons(responseUrl, taskConfirmMsg);
 }
 
 // ---------------------------------------------------------------------------

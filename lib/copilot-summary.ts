@@ -416,6 +416,20 @@ function formatSlackBlocks(
     body += `\n\n\u26a0\ufe0f *Phase notes:*\n${warningLines}`;
   }
 
+  // Phase warnings from match results (preview mode)
+  if (!didWrite) {
+    const matchPhaseWarnings = matches.filter((m) => m.phase_warning);
+    if (matchPhaseWarnings.length > 0) {
+      const warningLines = matchPhaseWarnings
+        .map((m) => {
+          const event = events.find((e) => e.id === m.event_id);
+          return `\u2022 ${event?.title || m.event_id}: ${m.phase_warning}`;
+        })
+        .join("\n");
+      body += `\n\n\u26a0\ufe0f *Phase notes:*\n${warningLines}`;
+    }
+  }
+
   // Task-uncertain: project matched but task is a guess (preview mode only)
   const taskUncertainBlocks: Record<string, unknown>[] = [];
   if (!didWrite) {
@@ -992,6 +1006,36 @@ export async function runCopilotSummary(
     if (task?.activity_id) {
       m.activity_id = task.activity_id;
       m.activity_name = task.activity_name || null;
+    }
+  }
+
+  // 4d. Phase resolution: swap tasks to the correct phase for the entry date
+  const matchPhaseCache = new PhaseCache();
+  for (const m of matches) {
+    if (m.project_id === null || m.task_id === null) continue;
+    const event = events.find((e) => e.id === m.event_id);
+    if (!event) continue;
+
+    try {
+      const phaseData = await matchPhaseCache.get(m.project_id);
+      const resolution = resolveTaskForPhase(
+        m.task_id,
+        m.task_title || "",
+        phaseData.tasks,
+        phaseData.phases,
+        event.start
+      );
+      if (resolution.swapped) {
+        m.task_id = resolution.taskId;
+        m.task_title = resolution.taskTitle;
+      }
+      if (resolution.blocked) {
+        m.task_id = null;
+        m.task_title = null;
+      }
+      m.phase_warning = resolution.warning;
+    } catch (err) {
+      m.phase_warning = `Could not verify phase: ${err instanceof Error ? err.message : "fetch failed"}. Entry may land on the wrong phase.`;
     }
   }
 
