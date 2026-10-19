@@ -51,6 +51,8 @@ export interface MatchResult {
   activity_id: number | null;
   activity_name: string | null;
   phase_warning?: string | null;
+  phase_ambiguous?: boolean;
+  phase_candidates?: { task_id: number; task_title: string; phase_id: number; phase_name: string }[];
 }
 
 interface MatchInput {

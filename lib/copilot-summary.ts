@@ -29,6 +29,7 @@ import { loadUserPrefs, saveUserPrefs, todayLondon, DEMO_BANNER } from "./user-p
 import { loadProjectTaskMemory } from "./project-task-memory";
 import { assertCanWrite } from "./demo-gate";
 import { PhaseCache, resolveTaskForPhase } from "./scoro-phases";
+import { loadPhaseMemory, phaseMemoryKey } from "./phase-memory";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -430,6 +431,39 @@ function formatSlackBlocks(
     }
   }
 
+  // Phase-ambiguous: task matched but multiple phases cover the date (preview mode only)
+  const phaseAmbiguousBlocks: Record<string, unknown>[] = [];
+  if (!didWrite) {
+    const phaseAmbiguous = matches.filter((m) => m.phase_ambiguous && m.phase_candidates && m.phase_candidates.length > 0);
+    if (phaseAmbiguous.length > 0) {
+      body += "\n\n*Which phase?*";
+      for (let i = 0; i < phaseAmbiguous.length; i++) {
+        const m = phaseAmbiguous[i];
+        const event = events.find((e) => e.id === m.event_id);
+        const title = event?.title || m.event_id;
+        const time = event ? timeSlot(event.start, event.end) : "";
+        const options = m.phase_candidates!.map((c) => ({
+          text: { type: "plain_text" as const, text: c.phase_name.slice(0, 75) },
+          value: String(c.task_id),
+        }));
+        phaseAmbiguousBlocks.push({
+          type: "section",
+          block_id: `phase_ev_${m.event_id}`,
+          text: {
+            type: "mrkdwn",
+            text: `${time} *${title}* \u2192 ${m.project_name} (${m.phase_candidates![0].task_title})`,
+          },
+          accessory: {
+            type: "static_select",
+            action_id: "select_phase",
+            placeholder: { type: "plain_text", text: "Pick a phase..." },
+            options,
+          },
+        });
+      }
+    }
+  }
+
   // Task-uncertain: project matched but task is a guess (preview mode only)
   const taskUncertainBlocks: Record<string, unknown>[] = [];
   if (!didWrite) {
@@ -554,6 +588,7 @@ function formatSlackBlocks(
         },
       },
       { type: "section", text: { type: "mrkdwn", text: body } },
+      ...phaseAmbiguousBlocks,
       ...taskUncertainBlocks,
       ...lowConfBlocks,
       { type: "divider" },
@@ -1011,8 +1046,9 @@ export async function runCopilotSummary(
 
   // 4d. Phase resolution: swap tasks to the correct phase for the entry date
   const matchPhaseCache = new PhaseCache();
+  const phaseMem = await loadPhaseMemory(slackId);
   for (const m of matches) {
-    if (m.project_id === null || m.task_id === null) continue;
+    if (m.project_id === null || m.task_id === null || !m.task_confident) continue;
     const event = events.find((e) => e.id === m.event_id);
     if (!event) continue;
 
@@ -1034,6 +1070,30 @@ export async function runCopilotSummary(
         m.task_title = null;
       }
       m.phase_warning = resolution.warning;
+
+      if (resolution.ambiguous) {
+        const memKey = phaseMemoryKey(m.project_id, m.task_title || "", event.start);
+        const remembered = phaseMem[memKey];
+        const memorisedCandidate = remembered
+          ? resolution.candidates.find((c) => c.taskId === remembered.task_id)
+          : null;
+
+        if (memorisedCandidate) {
+          m.task_id = memorisedCandidate.taskId;
+          m.task_title = memorisedCandidate.taskTitle;
+          m.phase_warning = null;
+        } else {
+          m.task_id = null;
+          m.task_title = null;
+          m.phase_ambiguous = true;
+          m.phase_candidates = resolution.candidates.map((c) => ({
+            task_id: c.taskId,
+            task_title: c.taskTitle,
+            phase_id: c.phaseId,
+            phase_name: c.phaseName,
+          }));
+        }
+      }
     } catch (err) {
       m.phase_warning = `Could not verify phase: ${err instanceof Error ? err.message : "fetch failed"}. Entry may land on the wrong phase.`;
     }
@@ -1131,6 +1191,15 @@ export async function runCopilotSummary(
       endDatetime: event?.end ?? null,
       activityId: m.activity_id ?? null,
       activityName: m.activity_name ?? null,
+      phaseUncertain: m.phase_ambiguous === true,
+      phaseCandidates: m.phase_ambiguous
+        ? m.phase_candidates?.map((c) => ({
+            taskId: c.task_id,
+            taskTitle: c.task_title,
+            phaseId: c.phase_id,
+            phaseName: c.phase_name,
+          }))
+        : undefined,
     };
   });
 

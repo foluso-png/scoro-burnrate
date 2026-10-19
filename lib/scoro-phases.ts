@@ -26,6 +26,13 @@ export interface ScoroPhase {
   end_date: string;   // "YYYY-MM-DD"
 }
 
+export interface PhaseCandidate {
+  taskId: number;
+  taskTitle: string;
+  phaseId: number;
+  phaseName: string;
+}
+
 export interface PhaseResolution {
   /** The task event_id to use (may differ from the originally matched task) */
   taskId: number;
@@ -37,6 +44,10 @@ export interface PhaseResolution {
   blocked: boolean;
   /** Warning message if the entry will land on the wrong phase */
   warning: string | null;
+  /** True when multiple phases cover the date and each has a matching task */
+  ambiguous: boolean;
+  /** The candidate tasks when ambiguous — one per covering phase */
+  candidates: PhaseCandidate[];
 }
 
 // ---------------------------------------------------------------------------
@@ -145,15 +156,30 @@ export function findPhaseForDate(
   dateStr: string
 ): ScoroPhase | null {
   if (phases.length === 0) return null;
-  // dateStr is "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS..."
   const date = dateStr.slice(0, 10);
   return phases.find((p) => p.start_date <= date && date <= p.end_date) ?? null;
 }
 
 /**
+ * Find ALL phases covering a given date (there may be several concurrent
+ * workstreams with the same date range).
+ */
+export function findAllPhasesForDate(
+  phases: ScoroPhase[],
+  dateStr: string
+): ScoroPhase[] {
+  if (phases.length === 0) return [];
+  const date = dateStr.slice(0, 10);
+  return phases.filter((p) => p.start_date <= date && date <= p.end_date);
+}
+
+/**
  * Given the AI-matched task, check whether it's on the correct phase for the
- * entry date. If not, try to find a sibling task (same name) on the correct
- * phase.
+ * entry date. If not, find sibling tasks (same title) on ALL phases covering
+ * the entry date:
+ *   - One sibling  → swap silently
+ *   - Several      → return ambiguous with candidates for a dropdown
+ *   - None         → warn, keep original
  *
  * @param matchedTaskId  - the event_id picked by the AI matcher
  * @param matchedTaskTitle - the task name picked by the AI matcher
@@ -168,78 +194,84 @@ export function resolveTaskForPhase(
   phases: ScoroPhase[],
   entryDate: string
 ): PhaseResolution {
+  const pass = { taskId: matchedTaskId, taskTitle: matchedTaskTitle, swapped: false, blocked: false, warning: null, ambiguous: false, candidates: [] };
+
   // No phases on this project — nothing to do
-  if (phases.length === 0) {
-    return { taskId: matchedTaskId, taskTitle: matchedTaskTitle, swapped: false, blocked: false, warning: null };
-  }
+  if (phases.length === 0) return pass;
 
   // Find the matched task's phase
   const matchedTask = allTasks.find((t) => t.task_id === matchedTaskId);
-  if (!matchedTask) {
-    // Task not in our list (shouldn't happen) — pass through
-    return { taskId: matchedTaskId, taskTitle: matchedTaskTitle, swapped: false, blocked: false, warning: null };
-  }
+  if (!matchedTask) return pass;
 
   // Unphased task (project_phase_id === 0) — leave it alone
-  if (matchedTask.project_phase_id === 0) {
-    return { taskId: matchedTaskId, taskTitle: matchedTaskTitle, swapped: false, blocked: false, warning: null };
-  }
+  if (matchedTask.project_phase_id === 0) return pass;
 
-  // Find which phase covers the entry date
-  const targetPhase = findPhaseForDate(phases, entryDate);
-  if (!targetPhase) {
-    // Entry date doesn't fall within any phase — warn but don't block
+  // Find ALL phases covering the entry date
+  const coveringPhases = findAllPhasesForDate(phases, entryDate);
+  if (coveringPhases.length === 0) {
     const dateDisplay = entryDate.slice(0, 10);
     return {
-      taskId: matchedTaskId,
-      taskTitle: matchedTaskTitle,
-      swapped: false,
-      blocked: false,
+      ...pass,
       warning: `No phase covers ${dateDisplay} on this project. Entry logged to "${matchedTaskTitle}" on the matched phase.`,
     };
   }
 
-  // Is the matched task already on the correct phase?
-  if (matchedTask.project_phase_id === targetPhase.id) {
-    return { taskId: matchedTaskId, taskTitle: matchedTaskTitle, swapped: false, blocked: false, warning: null };
+  // Is the matched task already on one of the covering phases?
+  if (coveringPhases.some((p) => p.id === matchedTask.project_phase_id)) {
+    return pass;
   }
 
-  // Wrong phase — try to find a sibling task with the same name on the target phase
-  const sibling = allTasks.find(
-    (t) =>
-      t.project_phase_id === targetPhase.id &&
-      t.title === matchedTaskTitle
+  // Wrong phase — find all sibling tasks (same title) on covering phases
+  const coveringPhaseIds = new Set(coveringPhases.map((p) => p.id));
+  const siblings = allTasks.filter(
+    (t) => coveringPhaseIds.has(t.project_phase_id) && t.title === matchedTaskTitle
   );
 
-  if (sibling) {
+  if (siblings.length === 1) {
+    // Unambiguous — swap silently
     return {
-      taskId: sibling.task_id,
-      taskTitle: sibling.title,
+      ...pass,
+      taskId: siblings[0].task_id,
+      taskTitle: siblings[0].title,
       swapped: true,
-      blocked: false,
-      warning: null,
     };
   }
 
-  // No sibling on the correct phase
+  if (siblings.length > 1) {
+    // Ambiguous — multiple phases have this task, user must pick
+    const candidates: PhaseCandidate[] = siblings.map((s) => {
+      const phase = coveringPhases.find((p) => p.id === s.project_phase_id);
+      return {
+        taskId: s.task_id,
+        taskTitle: s.title,
+        phaseId: s.project_phase_id,
+        phaseName: phase?.title ?? `Phase ${s.project_phase_id}`,
+      };
+    });
+    const phaseNames = candidates.map((c) => c.phaseName).join(", ");
+    return {
+      ...pass,
+      ambiguous: true,
+      candidates,
+      warning: `"${matchedTaskTitle}" covers several current phases (${phaseNames}). Pick one below.`,
+    };
+  }
+
+  // No sibling on any covering phase
   const wrongPhase = phases.find((p) => p.id === matchedTask.project_phase_id);
   const wrongPhaseName = wrongPhase?.title ?? `phase ${matchedTask.project_phase_id}`;
+  const coveringNames = coveringPhases.map((p) => p.title).join(", ");
 
   if (BLOCK_WRONG_PHASE) {
     return {
-      taskId: matchedTaskId,
-      taskTitle: matchedTaskTitle,
-      swapped: false,
+      ...pass,
       blocked: true,
-      warning: `"${matchedTaskTitle}" has no task on the ${targetPhase.title} phase. Entry would land on ${wrongPhaseName}. Ask your PM to add tasks to ${targetPhase.title}.`,
+      warning: `"${matchedTaskTitle}" has no task on any current phase (${coveringNames}). Entry would land on ${wrongPhaseName}. Ask your PM to create the task.`,
     };
   }
 
   return {
-    taskId: matchedTaskId,
-    taskTitle: matchedTaskTitle,
-    swapped: false,
-    blocked: false,
-    warning: `"${matchedTaskTitle}" landed on ${wrongPhaseName} instead of ${targetPhase.title}. No matching task exists on ${targetPhase.title} yet — ask your PM to create one.`,
+    ...pass,
+    warning: `"${matchedTaskTitle}" landed on ${wrongPhaseName} — no matching task found on current phases (${coveringNames}). Ask your PM to create one.`,
   };
 }
