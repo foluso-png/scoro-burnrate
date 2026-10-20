@@ -36,6 +36,7 @@ import { CAMPFIRE_ROLES } from "@/lib/roles";
 import { savePendingLeave } from "@/lib/pending-leave";
 import { DemoModeBlockedError } from "@/lib/demo-gate";
 import { PhaseCache, resolveTaskForPhase } from "@/lib/scoro-phases";
+import { loadPhaseMemory, phaseMemoryKey } from "@/lib/phase-memory";
 import {
   loadProjectTaskMemory,
   deleteProjectTaskMapping,
@@ -539,6 +540,84 @@ async function processFixCorrection(
         convo.pendingEntry.taskTitle = null;
       }
       fixPhaseWarning = resolution.warning;
+
+      if (resolution.ambiguous && convo.pendingEntry.projectId && entryDate) {
+        const phaseMem = await loadPhaseMemory(convo.slackUserId);
+        const memKey = phaseMemoryKey(
+          convo.pendingEntry.projectId,
+          convo.pendingEntry.taskTitle || "",
+          entryDate
+        );
+        const remembered = phaseMem[memKey];
+        const memorisedCandidate = remembered
+          ? resolution.candidates.find((c) => c.taskId === remembered.task_id)
+          : null;
+
+        if (memorisedCandidate) {
+          convo.pendingEntry.taskId = memorisedCandidate.taskId;
+          convo.pendingEntry.taskTitle = memorisedCandidate.taskTitle;
+          fixPhaseWarning = null;
+        } else {
+          // Post phase dropdown first; only save conversation on success
+          const phaseOptions = resolution.candidates.map((c) => ({
+            text: { type: "plain_text" as const, text: c.phaseName.slice(0, 75) },
+            value: String(c.taskId),
+          }));
+          const taskName = convo.pendingEntry.taskTitle || "unknown task";
+          const projName = convo.pendingEntry.projectName || "unknown project";
+          const dropdownText = `Matched *${draft.eventTitle}* to *${projName}* (${taskName}). Which phase?`;
+
+          const token = process.env.SLACK_BOT_TOKEN;
+          let posted = false;
+          if (token) {
+            const res = await fetch("https://slack.com/api/chat.postMessage", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                channel: channelId,
+                text: dropdownText,
+                blocks: [
+                  {
+                    type: "section",
+                    block_id: `phase_ev_${draft.eventId}`,
+                    text: { type: "mrkdwn", text: dropdownText },
+                    accessory: {
+                      type: "static_select",
+                      action_id: "select_phase",
+                      placeholder: { type: "plain_text", text: "Pick a phase..." },
+                      options: phaseOptions,
+                    },
+                  },
+                ],
+              }),
+            });
+            posted = res.ok;
+          }
+
+          if (posted) {
+            // Dropdown visible — save candidates on the draft
+            convo.step = "fixing";
+            convo.slackChannelId = channelId;
+            const fixDraftIdx = convo.fixingDraftIndex!;
+            convo.drafts[fixDraftIdx] = {
+              ...draft,
+              phaseUncertain: true,
+              phaseCandidates: resolution.candidates.map((c) => ({
+                taskId: c.taskId,
+                taskTitle: c.taskTitle,
+                phaseId: c.phaseId,
+                phaseName: c.phaseName,
+              })),
+            };
+            await saveConversation(convo);
+            return;
+          }
+          // Dropdown failed — keep task as-is, fall through with warning
+        }
+      }
     } catch (err) {
       fixPhaseWarning = `Could not verify phase: ${err instanceof Error ? err.message : "fetch failed"}. Entry may land on the wrong phase.`;
     }

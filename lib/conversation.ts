@@ -41,6 +41,8 @@ export interface DraftEntry {
   durationMinutes: number | null; // set for manual entries; calendar entries use event times
   startDatetime: string | null;   // ISO datetime; null for manual entries
   endDatetime: string | null;     // ISO datetime; null for manual entries
+  phaseUncertain?: boolean;      // true if multiple phases match and user must pick
+  phaseCandidates?: { taskId: number; taskTitle: string; phaseId: number; phaseName: string }[];
 }
 
 export interface PendingEntry {

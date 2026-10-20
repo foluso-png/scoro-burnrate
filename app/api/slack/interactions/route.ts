@@ -29,6 +29,7 @@ import {
 import { scoroPost } from "@/lib/matcher";
 import { assertCanWrite, DemoModeBlockedError } from "@/lib/demo-gate";
 import { PhaseCache, resolveTaskForPhase } from "@/lib/scoro-phases";
+import { loadPhaseMemory, phaseMemoryKey, savePhaseMapping } from "@/lib/phase-memory";
 import { isDemoMode, DEMO_BANNER } from "@/lib/user-prefs";
 
 // ---------------------------------------------------------------------------
@@ -74,6 +75,26 @@ async function postToResponseUrl(
       text,
     }),
   });
+}
+
+async function postBlocksToResponseUrl(
+  responseUrl: string,
+  text: string,
+  blocks: Record<string, unknown>[]
+): Promise<void> {
+  const res = await fetch(responseUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      response_type: "ephemeral",
+      replace_original: false,
+      text,
+      blocks,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Slack response_url returned ${res.status}`);
+  }
 }
 
 async function postSlackDm(channel: string, text: string): Promise<void> {
@@ -627,6 +648,64 @@ async function handleSelectProject(
         taskConfident = false;
       }
       phaseWarning = resolution.warning;
+
+      if (resolution.ambiguous && resolvedTask) {
+        const phaseMem = await loadPhaseMemory(userId);
+        const memKey = phaseMemoryKey(projectId, resolvedTask.title, draft.startDatetime!);
+        const remembered = phaseMem[memKey];
+        const memorisedCandidate = remembered
+          ? resolution.candidates.find((c) => c.taskId === remembered.task_id)
+          : null;
+
+        if (memorisedCandidate) {
+          resolvedTask = { ...resolvedTask, task_id: memorisedCandidate.taskId, title: memorisedCandidate.taskTitle };
+          phaseWarning = null;
+        } else {
+          // Post dropdown first; only null task on success
+          const phaseOptions = resolution.candidates.map((c) => ({
+            text: { type: "plain_text" as const, text: c.phaseName.slice(0, 75) },
+            value: String(c.taskId),
+          }));
+          const dropdownText = `Matched *${draft.eventTitle}* to *${project.name}* (${resolvedTask.title}). Which phase?`;
+          try {
+            await postBlocksToResponseUrl(responseUrl, dropdownText, [
+              {
+                type: "section",
+                block_id: `phase_ev_${draft.eventId}`,
+                text: { type: "mrkdwn", text: dropdownText },
+                accessory: {
+                  type: "static_select",
+                  action_id: "select_phase",
+                  placeholder: { type: "plain_text", text: "Pick a phase..." },
+                  options: phaseOptions,
+                },
+              },
+            ]);
+            // Dropdown posted — now safe to null task and save
+            convo.drafts[draftIdx] = {
+              ...draft,
+              projectId: project.project_id,
+              projectName: project.name,
+              taskId: null,
+              taskTitle: resolvedTask.title,
+              confidence: "high",
+              description: draft.description,
+              approved: false,
+              phaseUncertain: true,
+              phaseCandidates: resolution.candidates.map((c) => ({
+                taskId: c.taskId,
+                taskTitle: c.taskTitle,
+                phaseId: c.phaseId,
+                phaseName: c.phaseName,
+              })),
+            };
+            await saveConversation(convo);
+            return;
+          } catch {
+            // Dropdown failed — keep task as-is, fall through with warning
+          }
+        }
+      }
     } catch (err) {
       phaseWarning = `Could not verify phase: ${err instanceof Error ? err.message : "fetch failed"}. Entry may land on the wrong phase.`;
     }
@@ -800,6 +879,62 @@ async function handleSelectTask(
         resolvedTaskTitle = task?.title || draft.taskTitle;
       }
       taskPhaseWarning = resolution.warning;
+
+      if (resolution.ambiguous) {
+        const phaseMem = await loadPhaseMemory(userId);
+        const memKey = phaseMemoryKey(draft.projectId, resolvedTaskTitle || "", draft.startDatetime);
+        const remembered = phaseMem[memKey];
+        const memorisedCandidate = remembered
+          ? resolution.candidates.find((c) => c.taskId === remembered.task_id)
+          : null;
+
+        if (memorisedCandidate) {
+          resolvedTaskId = memorisedCandidate.taskId;
+          resolvedTaskTitle = memorisedCandidate.taskTitle;
+          taskPhaseWarning = null;
+        } else {
+          // Post dropdown first; only null task on success
+          const phaseOptions = resolution.candidates.map((c) => ({
+            text: { type: "plain_text" as const, text: c.phaseName.slice(0, 75) },
+            value: String(c.taskId),
+          }));
+          const dropdownText = `Updated *${draft.eventTitle}* task to *${resolvedTaskTitle || "unknown"}*. Which phase?`;
+          try {
+            await postBlocksToResponseUrl(responseUrl, dropdownText, [
+              {
+                type: "section",
+                block_id: `phase_ev_${draft.eventId}`,
+                text: { type: "mrkdwn", text: dropdownText },
+                accessory: {
+                  type: "static_select",
+                  action_id: "select_phase",
+                  placeholder: { type: "plain_text", text: "Pick a phase..." },
+                  options: phaseOptions,
+                },
+              },
+            ]);
+            // Dropdown posted — null task, save, wait for phase pick
+            convo.drafts[draftIdx] = {
+              ...draft,
+              taskId: null,
+              taskTitle: resolvedTaskTitle,
+              taskUncertain: false,
+              approved: false,
+              phaseUncertain: true,
+              phaseCandidates: resolution.candidates.map((c) => ({
+                taskId: c.taskId,
+                taskTitle: c.taskTitle,
+                phaseId: c.phaseId,
+                phaseName: c.phaseName,
+              })),
+            };
+            await saveConversation(convo);
+            return;
+          } catch {
+            // Dropdown failed — keep task as-is, fall through with warning
+          }
+        }
+      }
     } catch (err) {
       taskPhaseWarning = `Could not verify phase: ${err instanceof Error ? err.message : "fetch failed"}. Entry may land on the wrong phase.`;
     }
@@ -833,6 +968,84 @@ async function handleSelectTask(
     taskConfirmMsg += `\n\u26a0\ufe0f ${taskPhaseWarning}`;
   }
   await postResponseWithButtons(responseUrl, taskConfirmMsg);
+}
+
+// ---------------------------------------------------------------------------
+// Phase dropdown selection for ambiguous phase matches
+// ---------------------------------------------------------------------------
+async function handleSelectPhase(
+  userId: string,
+  responseUrl: string,
+  blockId: string,
+  selectedValue: string
+): Promise<void> {
+  const convo = await loadConversation(userId);
+  if (!convo) {
+    await postToResponseUrl(responseUrl, "No active session found.");
+    return;
+  }
+
+  const selectedTaskId = parseInt(selectedValue, 10);
+  if (isNaN(selectedTaskId)) {
+    await postToResponseUrl(responseUrl, "Invalid phase selection.");
+    return;
+  }
+
+  // blockId is "phase_ev_<eventId>" — use it to find the draft
+  const eventId = blockId.replace("phase_ev_", "");
+  const draftIdx = convo.drafts.findIndex(
+    (d) => d.eventId === eventId && d.phaseUncertain
+  );
+  if (draftIdx === -1) {
+    await postToResponseUrl(responseUrl, "Could not find the entry for that phase pick.");
+    return;
+  }
+
+  const draft = convo.drafts[draftIdx];
+  const candidate = draft.phaseCandidates?.find((c) => c.taskId === selectedTaskId);
+  if (!candidate) {
+    await postToResponseUrl(responseUrl, "That phase option is no longer available.");
+    return;
+  }
+
+  // Update draft with the resolved task
+  convo.drafts[draftIdx] = {
+    ...draft,
+    taskId: candidate.taskId,
+    taskTitle: candidate.taskTitle,
+    approved: true,
+    phaseUncertain: false,
+    phaseCandidates: undefined,
+  };
+  await saveConversation(convo);
+
+  // Save phase memory for this project + task + month
+  if (draft.projectId && draft.startDatetime) {
+    await savePhaseMapping(
+      userId,
+      draft.projectId,
+      candidate.taskTitle,
+      draft.startDatetime,
+      candidate.taskId,
+      candidate.phaseId,
+      candidate.phaseName
+    );
+  }
+
+  // Save event memory
+  if (draft.projectId && draft.startDatetime) {
+    await saveEventMapping(userId, draft.eventTitle, {
+      project_id: draft.projectId,
+      project_name: draft.projectName || "",
+      task_id: candidate.taskId,
+      task_title: candidate.taskTitle,
+    });
+  }
+
+  await postResponseWithButtons(
+    responseUrl,
+    `Updated *${draft.eventTitle}* to phase *${candidate.phaseName}*. Saved for this month.`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,6 +1316,18 @@ export async function POST(request: NextRequest) {
             responseUrl,
             taskBlockId,
             taskValue
+          );
+          break;
+        }
+        case "select_phase": {
+          const phaseBlockId = actions[0].block_id || "";
+          const phaseValue =
+            actions[0].selected_option?.value || "";
+          await handleSelectPhase(
+            userId,
+            responseUrl,
+            phaseBlockId,
+            phaseValue
           );
           break;
         }
