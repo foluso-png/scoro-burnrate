@@ -851,8 +851,8 @@ export async function runCopilotSummary(
         blocks: [{ type: "section", text: { type: "mrkdwn", text: leaveText } }],
       });
     }
-    // Stamp so the cron doesn't retry later today
-    if (!options.targetDate) {
+    // Stamp so the cron doesn't retry later today (skip for manual runs)
+    if (!options.targetDate && !options.skipDedupe) {
       prefs.lastSummarySentDate = today;
       await saveUserPrefs(slackId, prefs);
     }
@@ -895,8 +895,8 @@ export async function runCopilotSummary(
       blocks: emptyBlocks,
     });
 
-    // Stamp today's date to prevent duplicate summaries (only if caller opts in for empty days)
-    if (!options.targetDate && options.stampEmpty) {
+    // Stamp today's date to prevent duplicate summaries (only if caller opts in for empty days, not manual runs)
+    if (!options.targetDate && options.stampEmpty && !options.skipDedupe) {
       prefs.lastSummarySentDate = today;
       await saveUserPrefs(slackId, prefs);
     }
@@ -1163,8 +1163,9 @@ export async function runCopilotSummary(
     blocks: finalBlocks,
   });
 
-  // 6c. Stamp today's date to prevent duplicate summaries (skip in demo mode so user can re-run)
-  if (!options.targetDate && !prefs.demoMode) {
+  // 6c. Stamp today's date to prevent duplicate scheduled summaries
+  // Skip the stamp for manual runs (skipDedupe) so the evening cron still fires
+  if (!options.targetDate && !prefs.demoMode && !options.skipDedupe) {
     prefs.lastSummarySentDate = today;
     await saveUserPrefs(slackId, prefs);
   }

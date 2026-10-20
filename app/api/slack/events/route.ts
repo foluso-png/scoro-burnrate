@@ -1493,17 +1493,11 @@ async function handleEndOfDay(
 ): Promise<void> {
   await postThinking(channelId);
   try {
-    const result = await runCopilotSummary(userId, {
+    await runCopilotSummary(userId, {
       channelId,
       writeToScoro: false,
+      skipDedupe: true,
     });
-    if (result.slackStatus === "skipped: already sent today") {
-      await postSlackReply(
-        channelId,
-        [{ type: "section", text: { type: "mrkdwn", text: "You've already had today's summary. Check your messages above." } }],
-        "Already sent today"
-      );
-    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("On-demand summary error:", msg);
