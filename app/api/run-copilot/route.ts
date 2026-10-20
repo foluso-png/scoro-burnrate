@@ -100,7 +100,7 @@ export async function GET(request: NextRequest) {
   for (const slackId of eligible) {
     try {
       const result: SummaryResult = await runCopilotSummary(slackId, {
-        writeToScoro: true,
+        writeToScoro: false,
         projectLookup,
         stampEmpty: true,
         silentLeaveSkip: true,
