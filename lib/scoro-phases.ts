@@ -238,7 +238,21 @@ export function resolveTaskForPhase(
   }
 
   if (siblings.length > 1) {
-    // Ambiguous — multiple phases have this task, user must pick
+    // Deterministic order so re-runs pick the same task
+    siblings.sort((a, b) => a.task_id - b.task_id);
+
+    // All siblings on the same phase? Not truly ambiguous — pick the first.
+    const distinctPhases = new Set(siblings.map((s) => s.project_phase_id));
+    if (distinctPhases.size === 1) {
+      return {
+        ...pass,
+        taskId: siblings[0].task_id,
+        taskTitle: siblings[0].title,
+        swapped: true,
+      };
+    }
+
+    // Truly ambiguous — siblings span multiple phases, user must pick
     const candidates: PhaseCandidate[] = siblings.map((s) => {
       const phase = coveringPhases.find((p) => p.id === s.project_phase_id);
       return {

@@ -97,21 +97,18 @@ async function fetchDayEvents(
   accessToken: string,
   cutoff: Date,
   targetDate?: Date
-): Promise<CalendarEvent[]> {
+): Promise<{ events: CalendarEvent[]; laterTodayCount: number }> {
   const dayRef = targetDate || cutoff;
   const startOfDay = new Date(
     dayRef.getFullYear(),
     dayRef.getMonth(),
     dayRef.getDate()
   );
-  // For past dates, fetch the full day; for today, only up to now
-  const endBound = targetDate
-    ? new Date(startOfDay.getTime() + 86400000) // start of next day
-    : cutoff;
+  const endOfDay = new Date(startOfDay.getTime() + 86400000);
 
   const params = new URLSearchParams({
     timeMin: startOfDay.toISOString(),
-    timeMax: endBound.toISOString(),
+    timeMax: endOfDay.toISOString(),
     singleEvents: "true",
     orderBy: "startTime",
   });
@@ -129,7 +126,7 @@ async function fetchDayEvents(
   const data = await res.json();
   const items: GCalEvent[] = data.items || [];
 
-  return items
+  const allEvents = items
     .filter((e) => e.start?.dateTime && e.end?.dateTime)
     .map((e, i) => {
       const otherAttendees = (e.attendees || [])
@@ -148,6 +145,14 @@ async function fetchDayEvents(
         isInternal,
       };
     });
+
+  // For past dates, return everything. For today, split at cutoff.
+  if (targetDate) {
+    return { events: allEvents, laterTodayCount: 0 };
+  }
+  const cutoffMs = cutoff.getTime();
+  const events = allEvents.filter((e) => new Date(e.start).getTime() < cutoffMs);
+  return { events, laterTodayCount: allEvents.length - events.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -574,7 +579,7 @@ function formatSlackBlocks(
       "\n\nCheck these look right, then tap *Looks right* to save to Scoro.";
   }
 
-  const text = `\ud83d\udc4b Here's your end-of-day summary \u2014 ${today}\n\n${body}`;
+  const text = `\ud83d\udc4b Here's your end-of-day summary for ${today}\n\n${body}`;
 
   return {
     text,
@@ -583,7 +588,7 @@ function formatSlackBlocks(
         type: "header",
         text: {
           type: "plain_text",
-          text: `\ud83d\udc4b Here's your end-of-day summary \u2014 ${today}`,
+          text: `\ud83d\udc4b Here's your end-of-day summary for ${today}`,
           emoji: true,
         },
       },
@@ -840,7 +845,7 @@ export async function runCopilotSummary(
       const displayDate = options.targetDate
         ? options.targetDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" })
         : "today";
-      const leaveText = `You're on leave ${displayDate} — nothing to log. Enjoy your time off!`;
+      const leaveText = `You're on leave ${displayDate}. Nothing to log. Enjoy your time off!`;
       await postSlackMessage(channelId, {
         text: leaveText,
         blocks: [{ type: "section", text: { type: "mrkdwn", text: leaveText } }],
@@ -867,7 +872,7 @@ export async function runCopilotSummary(
   const accessToken = await getAccessToken(slackId);
 
   // 2. Fetch calendar events (for targetDate or today)
-  const events = await fetchDayEvents(accessToken, cutoff, options.targetDate);
+  const { events, laterTodayCount } = await fetchDayEvents(accessToken, cutoff, options.targetDate);
 
   const displayDate = (options.targetDate || new Date()).toLocaleDateString(
     "en-GB",
@@ -879,7 +884,7 @@ export async function runCopilotSummary(
     : null;
 
   if (events.length === 0) {
-    const text = `\ud83d\udc4b Here's your end-of-day summary \u2014 ${displayDate}\n\nNo events on the calendar for ${options.targetDate ? "that day" : "today"}. You can still add time below if you need to.`;
+    const text = `\ud83d\udc4b Here's your end-of-day summary for ${displayDate}\n\nNo events on the calendar for ${options.targetDate ? "that day" : "today"}. You can still add time below if you need to.`;
     const emptyBlocks: Record<string, unknown>[] = [
       ...(demoBannerBlock ? [demoBannerBlock] : []),
       { type: "section", text: { type: "mrkdwn", text } },
@@ -1109,12 +1114,14 @@ export async function runCopilotSummary(
     skipped = result.skipped;
   } else {
     // Still compute skipped for display, but don't write anything
+    // Exclude phase-ambiguous entries — they render in their own section
     skipped = matches.filter(
       (m) =>
-        m.is_trackable === false ||
+        !m.phase_ambiguous &&
+        (m.is_trackable === false ||
         m.project_id === null ||
         m.task_id === null ||
-        m.confidence === "low"
+        m.confidence === "low")
     );
   }
 
@@ -1130,7 +1137,16 @@ export async function runCopilotSummary(
     displayDate
   );
 
-  // 6b. Append a rotating sign-off message
+  // 6b. Note if events later today were excluded
+  if (laterTodayCount > 0) {
+    const noun = laterTodayCount === 1 ? "event" : "events";
+    blocks.push({
+      type: "context",
+      elements: [{ type: "mrkdwn", text: `_${laterTodayCount} more ${noun} later today. Run Log my day again once they're done._` }],
+    });
+  }
+
+  // 6c. Append a rotating sign-off message
   const totalMinutes = events.reduce((sum, e) => {
     const ms = new Date(e.end).getTime() - new Date(e.start).getTime();
     return sum + Math.round(ms / 60000);
