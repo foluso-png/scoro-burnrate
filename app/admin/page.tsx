@@ -1,3 +1,4 @@
+import { notFound } from "next/navigation";
 import { listRegisteredUsers, loadTokens } from "@/lib/google-auth";
 import { loadLastRun, LastRunRecord } from "@/lib/last-run";
 import { loadUserPrefs, UserPrefs } from "@/lib/user-prefs";
@@ -12,7 +13,15 @@ interface UserRow {
 
 export const dynamic = "force-dynamic";
 
-export default async function AdminPage() {
+export default async function AdminPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = await searchParams;
+  if (!process.env.ADMIN_SECRET || params.secret !== process.env.ADMIN_SECRET) {
+    notFound();
+  }
   const slackIds = await listRegisteredUsers();
 
   const users: UserRow[] = await Promise.all(
