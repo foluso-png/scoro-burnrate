@@ -265,6 +265,11 @@ async function handleLooksRight(
         .join("\n");
     }
 
+    const userSkipped = results.filter((r) => r.skipReason);
+    if (userSkipped.length > 0) {
+      summary += `\n\n${userSkipped.map((r) => `\u2022 ${r.eventTitle}: ${r.skipReason}`).join("\n")}`;
+    }
+
     summary += "\n\nAll done. Have a good evening!";
 
     await postToResponseUrl(responseUrl, summary);

@@ -8,6 +8,8 @@ import { PhaseCache, resolveTaskForPhase } from "./scoro-phases";
 // Constants
 // ---------------------------------------------------------------------------
 const COPILOT_TAG = "[Co-pilot]";
+const COPILOT_ADDED_TAG = "[Co-pilot added]";
+const COPILOT_FIXED_TAG = "[Co-pilot fixed]";
 const COPILOT_DRAFT_TAG = "[Co-pilot draft]";
 
 // ---------------------------------------------------------------------------
@@ -34,6 +36,7 @@ export interface WriteResultItem {
   resolvedTaskId: number | null;
   error: string | null;
   phaseWarning: string | null;
+  skipReason?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -53,15 +56,22 @@ function parseScoroDuration(dur: string): number {
 
 function isCopilotEntry(description: string | undefined): boolean {
   if (!description) return false;
-  return description.includes(COPILOT_TAG) || description.includes(COPILOT_DRAFT_TAG);
+  return description.includes("[Co-pilot");
 }
 
-/** Strip the [Co-pilot] or [Co-pilot draft] prefix to get the raw description body. */
-function copilotDescriptionBody(description: string): string {
-  return description
-    .replace(COPILOT_DRAFT_TAG, "")
-    .replace(COPILOT_TAG, "")
-    .trim();
+/** Is this a calendar-derived entry that the bot may overwrite? */
+function isOverwritable(description: string | undefined): boolean {
+  if (!description) return false;
+  // Only plain [Co-pilot] entries are overwritable.
+  // [Co-pilot added], [Co-pilot fixed], and [Co-pilot draft] are not.
+  return description.startsWith(COPILOT_TAG) &&
+    !description.startsWith(COPILOT_ADDED_TAG) &&
+    !description.startsWith(COPILOT_FIXED_TAG) &&
+    !description.startsWith(COPILOT_DRAFT_TAG);
+}
+
+function sameInstant(a: string, b: string): boolean {
+  return new Date(a).getTime() === new Date(b).getTime();
 }
 
 // ---------------------------------------------------------------------------
@@ -190,28 +200,59 @@ async function writeOrUpdateEntry(
     phaseWarning = "Could not verify phase — phase data fetch failed. Entry logged to the matched task.";
   }
 
-  // Match-and-update: find an existing co-pilot entry for the same task
-  // Match against the resolved task ID (may have been swapped for phase)
-  const existing = existingEntries.find(
-    (e) => e.event_id === resolvedTaskId && isCopilotEntry(e.description)
-  );
+  // Match-and-update: find an existing calendar-derived entry for the same
+  // task AND time window. Only [Co-pilot] entries are eligible; [Co-pilot added],
+  // [Co-pilot fixed], and [Co-pilot draft] are never touched.
+  const existing = (draft.startDatetime && draft.endDatetime)
+    ? existingEntries.find(
+        (e) =>
+          e.event_id === resolvedTaskId &&
+          isOverwritable(e.description) &&
+          e.start_datetime != null && e.end_datetime != null &&
+          sameInstant(e.start_datetime, draft.startDatetime!) &&
+          sameInstant(e.end_datetime, draft.endDatetime!)
+      )
+    : undefined;
+
+  // If a non-overwritable copilot entry already covers this time window,
+  // skip entirely — the user has already dealt with this meeting manually.
+  if (draft.startDatetime && draft.endDatetime) {
+    const alreadyHandled = existingEntries.find(
+      (e) =>
+        e.event_id === resolvedTaskId &&
+        isCopilotEntry(e.description) &&
+        !isOverwritable(e.description) &&
+        e.start_datetime != null && e.end_datetime != null &&
+        sameInstant(e.start_datetime, draft.startDatetime!) &&
+        sameInstant(e.end_datetime, draft.endDatetime!)
+    );
+    if (alreadyHandled) {
+      return {
+        eventTitle: draft.eventTitle,
+        projectName: draft.projectName,
+        durationMinutes: durationMins,
+        action: "skipped",
+        scoroEntryId: alreadyHandled.time_entry_id || alreadyHandled.id!,
+        resolvedTaskId,
+        error: null,
+        phaseWarning,
+        skipReason: "left alone, you edited this one",
+      };
+    }
+  }
+
+  // Pick the description tag: calendar entries get [Co-pilot], manual ones get [Co-pilot added]
+  const tag = draft.startDatetime ? COPILOT_TAG : COPILOT_ADDED_TAG;
 
   try {
     if (existing) {
-      // Same event rewritten (e.g. lunch run then 6pm run) → SET duration.
-      // Different event on the same task (e.g. two separate meetings) → ADD duration.
-      const existingBody = copilotDescriptionBody(existing.description || "");
-      const isSameEvent = existingBody === draft.description.trim();
-
-      const existingMins = existing.duration ? parseScoroDuration(existing.duration) : 0;
-      const totalMins = isSameEvent ? durationMins : existingMins + durationMins;
-
+      // Same meeting, same time window. SET the duration (idempotent).
       const entryId = existing.time_entry_id || existing.id!;
-      const description = `${COPILOT_TAG} ${draft.description}`;
+      const description = `${tag} ${draft.description}`;
 
       await scoroPost(`/timeEntries/modify/${entryId}`, {
         request: {
-          duration: durationToStr(totalMins),
+          duration: durationToStr(durationMins),
           description,
           is_completed: true,
           ...(draft.activityId ? { activity_id: draft.activityId } : {}),
@@ -224,7 +265,7 @@ async function writeOrUpdateEntry(
         return {
           eventTitle: draft.eventTitle,
           projectName: draft.projectName,
-          durationMinutes: totalMins,
+          durationMinutes: durationMins,
           action: "failed",
           scoroEntryId: null,
           error: "Scoro accepted the update but the entry could not be verified afterwards",
@@ -236,7 +277,7 @@ async function writeOrUpdateEntry(
       return {
         eventTitle: draft.eventTitle,
         projectName: draft.projectName,
-        durationMinutes: totalMins,
+        durationMinutes: durationMins,
         action: "updated",
         scoroEntryId: entryId,
         resolvedTaskId,
@@ -258,8 +299,21 @@ async function writeOrUpdateEntry(
           `[stale-id] Rejected draft.scoroEntryId ${draft.scoroEntryId} for "${draft.eventTitle}" (date: ${draft.startDatetime ?? "unknown"}) — not in today's entries. Creating new entry instead.`
         );
         // Fall through to the create path below
+      } else if (!isOverwritable(existingEntries.find((e) => (e.time_entry_id || e.id) === draft.scoroEntryId)?.description)) {
+        // Entry has been fixed or manually added — do not downgrade its tag
+        return {
+          eventTitle: draft.eventTitle,
+          projectName: draft.projectName,
+          durationMinutes: durationMins,
+          action: "skipped",
+          scoroEntryId: draft.scoroEntryId,
+          resolvedTaskId,
+          error: null,
+          phaseWarning,
+          skipReason: "left alone, you edited this one",
+        };
       } else {
-        const description = `${COPILOT_TAG} ${draft.description}`;
+        const description = `${tag} ${draft.description}`;
 
         await scoroPost(`/timeEntries/modify/${draft.scoroEntryId}`, {
           request: {
@@ -300,7 +354,7 @@ async function writeOrUpdateEntry(
     // Create new entry
     const today = new Date();
     const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-    const description = `${COPILOT_TAG} ${draft.description}`;
+    const description = `${tag} ${draft.description}`;
 
     // For manual entries without specific times, use 09:00 as start
     const rawStart = draft.startDatetime || `${dateStr}T09:00:00`;
@@ -387,17 +441,49 @@ export async function updateExistingEntry(
     description?: string;
     activityId?: number;
   }
-): Promise<void> {
+): Promise<{ retagWarning?: string }> {
   await assertCanWrite(slackUserId);
 
   const payload: Record<string, unknown> = {};
+  let retagWarning: string | undefined;
 
   if (updates.taskId !== undefined) payload.event_id = updates.taskId;
-  if (updates.description !== undefined) payload.description = `${COPILOT_TAG} ${updates.description}`;
   if (updates.durationMinutes !== undefined) payload.duration = durationToStr(updates.durationMinutes);
   if (updates.activityId !== undefined) payload.activity_id = updates.activityId;
 
+  // Any fix must re-tag the entry as [Co-pilot fixed] so it's protected
+  // from overwrite on re-runs. Exception: [Co-pilot added] entries stay
+  // as-is because they were manually added, not calendar-derived.
+  if (updates.description !== undefined) {
+    payload.description = `${COPILOT_FIXED_TAG} ${updates.description}`;
+  } else {
+    // Description not changing, but we still need to swap the tag.
+    // Fetch the current entry to read its description.
+    try {
+      const res = await scoroPost<Record<string, unknown>>(
+        `/timeEntries/view/${entryId}`,
+        {}
+      );
+      const currentDesc = (res.data.description as string) || "";
+      // Leave [Co-pilot added] entries alone
+      if (!currentDesc.startsWith(COPILOT_ADDED_TAG)) {
+        const body = currentDesc
+          .replace(COPILOT_FIXED_TAG, "")
+          .replace(COPILOT_DRAFT_TAG, "")
+          .replace(COPILOT_TAG, "")
+          .trim();
+        payload.description = `${COPILOT_FIXED_TAG} ${body}`;
+      }
+    } catch (err) {
+      console.error(
+        `[retag] Failed to read entry ${entryId} for re-tagging: ${err instanceof Error ? err.message : String(err)}`
+      );
+      retagWarning = "Your fix was saved but the entry could not be marked as protected. It may be overwritten on the next run.";
+    }
+  }
+
   await scoroPost(`/timeEntries/modify/${entryId}`, { request: payload });
+  return { retagWarning };
 }
 
 // ---------------------------------------------------------------------------
@@ -431,11 +517,14 @@ export async function finaliseAndWrite(
     // If we created/updated an entry, add it to the "existing" list so
     // subsequent drafts for the same task will match-and-update against it
     if (result.scoroEntryId && result.action !== "skipped" && result.action !== "skipped_demo" && result.action !== "failed") {
+      const entryTag = draft.startDatetime ? COPILOT_TAG : COPILOT_ADDED_TAG;
       existingEntries.push({
         time_entry_id: result.scoroEntryId,
         event_id: result.resolvedTaskId ?? draft.taskId!,
-        description: `${COPILOT_TAG} ${draft.description}`,
+        description: `${entryTag} ${draft.description}`,
         duration: durationToStr(result.durationMinutes),
+        start_datetime: draft.startDatetime ?? undefined,
+        end_datetime: draft.endDatetime ?? undefined,
       });
     }
   }
