@@ -19,7 +19,14 @@ export default async function AdminPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const params = await searchParams;
-  if (!process.env.ADMIN_SECRET || params.secret !== process.env.ADMIN_SECRET) {
+  const envSecret = (process.env.ADMIN_SECRET ?? "").trim();
+  if (!envSecret) {
+    console.error("[admin] ADMIN_SECRET is not set in this environment");
+    notFound();
+  }
+  const rawParam = Array.isArray(params.secret) ? params.secret[0] : params.secret;
+  const querySecret = (rawParam ?? "").trim();
+  if (querySecret !== envSecret) {
     notFound();
   }
   const slackIds = await listRegisteredUsers();
