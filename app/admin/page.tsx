@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { listRegisteredUsers, loadTokens } from "@/lib/google-auth";
 import { loadLastRun, LastRunRecord } from "@/lib/last-run";
 import { loadUserPrefs, UserPrefs } from "@/lib/user-prefs";
+import { readUsage } from "@/lib/write-log";
 
 interface UserRow {
   slackId: string;
@@ -9,6 +10,7 @@ interface UserRow {
   email: string | null;
   lastRun: LastRunRecord | null;
   prefs: UserPrefs;
+  usage: { count7d: number; lastApproved: string | null } | null;
 }
 
 export const dynamic = "force-dynamic";
@@ -33,10 +35,11 @@ export default async function AdminPage({
 
   const users: UserRow[] = await Promise.all(
     slackIds.map(async (slackId) => {
-      const [tokens, lastRun, prefs] = await Promise.all([
+      const [tokens, lastRun, prefs, usage] = await Promise.all([
         loadTokens(slackId),
         loadLastRun(slackId),
         loadUserPrefs(slackId),
+        readUsage(slackId),
       ]);
       return {
         slackId,
@@ -44,6 +47,7 @@ export default async function AdminPage({
         email: tokens?.email ?? null,
         lastRun,
         prefs,
+        usage,
       };
     })
   );
@@ -75,9 +79,10 @@ export default async function AdminPage({
                   <th className="px-4 py-3">Email</th>
                   <th className="px-4 py-3">Slack ID</th>
                   <th className="px-4 py-3">Delivery</th>
-                  <th className="px-4 py-3">Last run</th>
+                  <th className="px-4 py-3">Last draft sent</th>
                   <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">Entries</th>
+                  <th className="px-4 py-3">Logged (7d)</th>
+                  <th className="px-4 py-3">Last approved</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -122,7 +127,12 @@ export default async function AdminPage({
                       )}
                     </td>
                     <td className="px-4 py-3 text-gray-600">
-                      {u.lastRun ? u.lastRun.entryCount : "—"}
+                      {u.usage === null ? "—" : u.usage.count7d}
+                    </td>
+                    <td className="px-4 py-3 text-gray-600">
+                      {u.usage?.lastApproved
+                        ? formatTimestamp(u.usage.lastApproved)
+                        : "—"}
                     </td>
                   </tr>
                 ))}
@@ -130,6 +140,10 @@ export default async function AdminPage({
             </table>
           </div>
         )}
+
+        <p className="text-gray-400 text-xs mt-4">
+          Logged (7d) and Last approved only count from 5 November 2026, when recording was added.
+        </p>
       </div>
     </div>
   );

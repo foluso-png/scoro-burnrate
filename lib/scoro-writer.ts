@@ -3,6 +3,7 @@ import { scoroPost, toNaiveLondon } from "./matcher";
 import type { ConversationState, DraftEntry } from "./conversation";
 import { assertCanWrite } from "./demo-gate";
 import { PhaseCache, resolveTaskForPhase } from "./scoro-phases";
+import { recordWrites } from "./write-log";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -54,7 +55,7 @@ function parseScoroDuration(dur: string): number {
   return parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
 }
 
-function isCopilotEntry(description: string | undefined): boolean {
+export function isCopilotEntry(description: string | undefined): boolean {
   if (!description) return false;
   return description.includes("[Co-pilot");
 }
@@ -528,6 +529,12 @@ export async function finaliseAndWrite(
       });
     }
   }
+
+  // Record successful writes for the admin usage dashboard
+  const successCount = results.filter(
+    (r) => r.action === "created" || r.action === "updated"
+  ).length;
+  await recordWrites(convo.slackUserId, successCount);
 
   return results;
 }
