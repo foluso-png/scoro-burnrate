@@ -73,8 +73,21 @@ function verifySlackSignature(
 function parseDurationMinutes(text: string): number | null {
   const normalized = text.toLowerCase();
 
+  // Natural-language phrases (check before numeric patterns)
+  if (/\ban?\s+hour\s+and\s+a\s+half\b/.test(normalized)) return 90;
+  if (/\bhalf\s+an?\s+hour\b/.test(normalized)) return 30;
+  if (/\b(an?|one)\s+hour\b/.test(normalized)) return 60;
+
+  // Guard: reject ambiguous ranges like "1-2 hours" where digits appear on both
+  // sides of the hyphen before a time unit
+  if (/\d[\s]*-[\s]*\d[\s]*(?:h(?:ours?|rs?|r)?|m(?:ins?|inutes?)?)(?![a-z])/i.test(normalized)) {
+    return null;
+  }
+
+  // Hours (+ optional minutes), allowing optional hyphen: "1h", "1-hour", "2h 30m"
+  // (?![a-z]) after unit prevents matching project names like "Dove 2026 Media"
   const hm = normalized.match(
-    /(\d+(?:\.\d+)?)\s*h(?:ours?|rs?|r)?\s*(?:(\d+)\s*m(?:ins?|inutes?)?)?/
+    /(\d+(?:\.\d+)?)[\s-]*h(?:ours?|rs?|r)?(?![a-z])[\s-]*(?:(\d+)[\s-]*m(?:ins?|inutes?)?(?![a-z]))?/
   );
   if (hm) {
     const hours = parseFloat(hm[1]);
@@ -82,17 +95,30 @@ function parseDurationMinutes(text: string): number | null {
     return Math.round(hours * 60) + mins;
   }
 
-  const mOnly = normalized.match(/(\d+)\s*m(?:ins?|inutes?)?/);
+  // Minutes only, allowing optional hyphen: "45m", "45-mins"
+  const mOnly = normalized.match(/(\d+)[\s-]*m(?:ins?|inutes?)?(?![a-z])/);
   if (mOnly) {
     return parseInt(mOnly[1], 10);
   }
 
-  const hoursOnly = normalized.match(/(\d+(?:\.\d+)?)\s*hours?/);
+  // Standalone "X hours" (no leading h-shorthand), allowing optional hyphen
+  const hoursOnly = normalized.match(/(\d+(?:\.\d+)?)[\s-]*hours?(?![a-z])/);
   if (hoursOnly) {
     return Math.round(parseFloat(hoursOnly[1]) * 60);
   }
 
   return null;
+}
+
+/**
+ * Returns true if the text contains something that looks like a duration
+ * (a number next to a time-unit word) even if parseDurationMinutes cannot
+ * extract a clean value. Used to warn the user rather than silently ignoring.
+ */
+function looksLikeDurationAttempt(text: string): boolean {
+  const lower = text.toLowerCase();
+  return /\d[\s-]*(?:h(?:ours?|rs?|r)?|m(?:ins?|inutes?)?)(?![a-z])/.test(lower)
+    || /\b(an?\s+hour|one\s+hour|half\s+an?\s+hour)\b/.test(lower);
 }
 
 function formatDuration(mins: number): string {
@@ -485,6 +511,24 @@ async function processFixCorrection(
 
   const match = matches[0];
 
+  // 3b: Text looks like a duration but we couldn't parse it — tell the user
+  if (!durationMinutes && looksLikeDurationAttempt(text)) {
+    await postSlackReply(
+      channelId,
+      [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "I couldn't read that duration. Try a format like _\"1 hour\"_, _\"45 mins\"_, or _\"1h 30m\"_.",
+          },
+        },
+      ],
+      "Duration not recognised"
+    );
+    return;
+  }
+
   // If no match and no duration change, we can't do anything useful
   if (!match && !durationMinutes) {
     await postSlackReply(
@@ -502,6 +546,12 @@ async function processFixCorrection(
     );
     return;
   }
+
+  // 3a: No duration parsed and a low-confidence project match — flag it on the
+  // confirmation card so the user knows we read it as a project change, not a
+  // duration change. The card now always shows the duration, so they can see
+  // nothing changed.
+  const lowConfidenceNoDuration = !durationMinutes && match?.confidence === "low";
 
   // Build the pending fix
   convo.pendingEntry = {
@@ -628,7 +678,11 @@ async function processFixCorrection(
   await saveConversation(convo);
 
   // Build confirmation message
-  const dur = formatDuration(convo.pendingEntry.durationMinutes);
+  const newDur = formatDuration(convo.pendingEntry.durationMinutes);
+  const oldDur = formatDuration(draft.durationMinutes || 0);
+  const durationLabel = durationMinutes
+    ? `${newDur} (changed from ${oldDur})`
+    : `${oldDur} (unchanged)`;
   const project = convo.pendingEntry.projectName || "unknown project";
   const client = convo.pendingEntry.clientName
     ? ` (${convo.pendingEntry.clientName})`
@@ -641,10 +695,11 @@ async function processFixCorrection(
   if (convo.pendingEntry.taskTitle) {
     confirmText += `\n\u2022 Task: ${convo.pendingEntry.taskTitle}`;
   }
-  if (durationMinutes) {
-    confirmText += `\n\u2022 Duration: ${dur}`;
-  }
-  if (match?.confidence === "low") {
+  confirmText += `\n\u2022 Duration: ${durationLabel}`;
+  if (lowConfidenceNoDuration) {
+    confirmText +=
+      "\n\nI've read this as a project change rather than a duration change. If you meant to change the time, reply with something like _\"1 hour\"_ or _\"45 mins\"_.";
+  } else if (match?.confidence === "low") {
     confirmText +=
       "\n\n\u26a0\ufe0f Low confidence match. Please check the project is correct.";
   }

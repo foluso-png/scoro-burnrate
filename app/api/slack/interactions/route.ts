@@ -438,6 +438,22 @@ async function handleConfirmFix(
   const draft = convo.drafts[idx];
   const pe = convo.pendingEntry;
 
+  // Detect no-op: nothing actually changed
+  const projectSame = pe.projectId === draft.projectId;
+  const taskSame = pe.taskId === draft.taskId;
+  const durationSame = !pe.durationMinutes || pe.durationMinutes === (draft.durationMinutes || 0);
+  if (projectSame && taskSame && durationSame) {
+    convo.pendingEntry = null;
+    convo.fixingDraftIndex = null;
+    convo.step = "review_matches";
+    await saveConversation(convo);
+    await postResponseWithButtons(
+      responseUrl,
+      `Nothing changed on *${draft.eventTitle}*. The project, task, and duration are the same as before. If you need to change the duration, try _"was actually 1 hour"_ or _"45 mins"_.`
+    );
+    return;
+  }
+
   // Update the draft in conversation state
   draft.projectId = pe.projectId;
   draft.projectName = pe.projectName;
