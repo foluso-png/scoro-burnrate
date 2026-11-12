@@ -151,6 +151,30 @@ function buildActionButtons(): Record<string, unknown> {
   };
 }
 
+/**
+ * Reply to a stale button press when the session has expired or there is
+ * nothing pending. Always gives the user a way forward via "Log my day".
+ */
+async function postExpiredSessionReply(
+  responseUrl: string,
+  reason: string
+): Promise<void> {
+  await postBlocksToResponseUrl(responseUrl, reason, [
+    { type: "section", text: { type: "mrkdwn", text: reason } },
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          text: { type: "plain_text", text: "\ud83d\udcdd Log my day", emoji: true },
+          action_id: "wrap_up",
+          style: "primary",
+        },
+      ],
+    },
+  ]);
+}
+
 async function postResponseWithButtons(
   responseUrl: string,
   text: string
@@ -186,9 +210,9 @@ async function handleLooksRight(
 ): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    await postToResponseUrl(
+    await postExpiredSessionReply(
       responseUrl,
-      "No active timesheet session found. Run the Co-pilot first."
+      "That summary has already been saved. Tap *Log my day* below to pull your day up again — nothing will be duplicated in Scoro."
     );
     return;
   }
@@ -196,9 +220,9 @@ async function handleLooksRight(
   const approvedDrafts = convo.drafts.filter((d) => d.approved);
   if (approvedDrafts.length === 0) {
     await clearConversation(userId);
-    await postToResponseUrl(
+    await postExpiredSessionReply(
       responseUrl,
-      "\u2705 No entries to write. Session closed."
+      "\u2705 No entries to write. Tap *Log my day* below if you need to start a new session."
     );
     return;
   }
@@ -284,9 +308,9 @@ async function handleAddTime(
 ): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    await postToResponseUrl(
+    await postExpiredSessionReply(
       responseUrl,
-      "No active timesheet session found. Run the Co-pilot first."
+      "That session has ended. Tap *Log my day* below to start a new one, then use *Add time* from there."
     );
     return;
   }
@@ -306,18 +330,18 @@ async function handleFixEntry(
 ): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    await postToResponseUrl(
+    await postExpiredSessionReply(
       responseUrl,
-      "No active timesheet session found. Run the Co-pilot first."
+      "That session has ended. Tap *Log my day* below to pull your day up again, then you can fix any entry from there."
     );
     return;
   }
 
   const approvedDrafts = convo.drafts.filter((d) => d.approved);
   if (approvedDrafts.length === 0) {
-    await postToResponseUrl(
+    await postExpiredSessionReply(
       responseUrl,
-      "No entries to fix. Try *Add time* instead."
+      "No entries to fix right now. Tap *Log my day* below to start a new session."
     );
     return;
   }
@@ -345,18 +369,18 @@ async function handleConfirmEntry(
 ): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    await postToResponseUrl(
+    await postExpiredSessionReply(
       responseUrl,
-      "Nothing to confirm. Try *Add time* first."
+      "That session has ended. Tap *Log my day* below to start a new one."
     );
     return;
   }
 
   const entries = convo.pendingEntries || [];
   if (entries.length === 0) {
-    await postToResponseUrl(
+    await postExpiredSessionReply(
       responseUrl,
-      "Nothing to confirm. Try *Add time* first."
+      "There's nothing pending to confirm. Tap *Log my day* below to start a new session."
     );
     return;
   }
@@ -409,7 +433,10 @@ async function handleRejectEntry(
 ): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    await postToResponseUrl(responseUrl, "Nothing to reject.");
+    await postExpiredSessionReply(
+      responseUrl,
+      "That session has ended. Tap *Log my day* below to start a new one."
+    );
     return;
   }
 
@@ -430,7 +457,10 @@ async function handleConfirmFix(
 ): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo || !convo.pendingEntry || convo.fixingDraftIndex === null) {
-    await postToResponseUrl(responseUrl, "Nothing to confirm.");
+    await postExpiredSessionReply(
+      responseUrl,
+      "That fix has already been applied, or the session has ended. Tap *Log my day* below to pull your day up again."
+    );
     return;
   }
 
@@ -522,7 +552,10 @@ async function handleRejectFix(
 ): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    await postToResponseUrl(responseUrl, "Nothing to reject.");
+    await postExpiredSessionReply(
+      responseUrl,
+      "That session has ended. Tap *Log my day* below to start a new one."
+    );
     return;
   }
 
@@ -566,7 +599,10 @@ async function handleSelectProject(
 ): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    await postToResponseUrl(responseUrl, "No active session found.");
+    await postExpiredSessionReply(
+      responseUrl,
+      "That session has ended. Tap *Log my day* below to pull your day up again."
+    );
     return;
   }
 
@@ -846,7 +882,10 @@ async function handleSelectTask(
 ): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    await postToResponseUrl(responseUrl, "No active session found.");
+    await postExpiredSessionReply(
+      responseUrl,
+      "That session has ended. Tap *Log my day* below to pull your day up again."
+    );
     return;
   }
 
@@ -1002,7 +1041,10 @@ async function handleSelectPhase(
 ): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    await postToResponseUrl(responseUrl, "No active session found.");
+    await postExpiredSessionReply(
+      responseUrl,
+      "That session has ended. Tap *Log my day* below to pull your day up again."
+    );
     return;
   }
 
@@ -1080,7 +1122,10 @@ async function handleSelectActivity(
 ): Promise<void> {
   const convo = await loadConversation(userId);
   if (!convo) {
-    await postToResponseUrl(responseUrl, "No active session found.");
+    await postExpiredSessionReply(
+      responseUrl,
+      "That session has ended. Tap *Log my day* below to pull your day up again."
+    );
     return;
   }
 
