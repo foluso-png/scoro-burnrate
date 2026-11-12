@@ -204,21 +204,45 @@ async function writeOrUpdateEntry(
   // Match-and-update: find an existing calendar-derived entry for the same
   // task AND time window. Only [Co-pilot] entries are eligible; [Co-pilot added],
   // [Co-pilot fixed], and [Co-pilot draft] are never touched.
-  const existing = (draft.startDatetime && draft.endDatetime)
-    ? existingEntries.find(
+  //
+  // Primary: exact match on task + start + end.
+  // Fallback: task + start only (handles duration changes where the end moved).
+  //   Only used when exactly one candidate exists; if ambiguous, fall through.
+  let existing: ScoroTimeEntry | undefined;
+  if (draft.startDatetime && draft.endDatetime) {
+    existing = existingEntries.find(
+      (e) =>
+        e.event_id === resolvedTaskId &&
+        isOverwritable(e.description) &&
+        e.start_datetime != null && e.end_datetime != null &&
+        sameInstant(e.start_datetime, draft.startDatetime!) &&
+        sameInstant(e.end_datetime, draft.endDatetime!)
+    );
+
+    // Fallback: same task + same start, any end (duration was changed)
+    if (!existing && draft.startDatetime) {
+      const startCandidates = existingEntries.filter(
         (e) =>
           e.event_id === resolvedTaskId &&
           isOverwritable(e.description) &&
-          e.start_datetime != null && e.end_datetime != null &&
-          sameInstant(e.start_datetime, draft.startDatetime!) &&
-          sameInstant(e.end_datetime, draft.endDatetime!)
-      )
-    : undefined;
+          e.start_datetime != null &&
+          sameInstant(e.start_datetime, draft.startDatetime!)
+      );
+      if (startCandidates.length === 1) {
+        existing = startCandidates[0];
+      } else if (startCandidates.length > 1) {
+        console.error(
+          `[dup-guard] Ambiguous start-only match: ${startCandidates.length} overwritable entries for task ${resolvedTaskId} at ${draft.startDatetime}. Not guessing.`
+        );
+      }
+    }
+  }
 
   // If a non-overwritable copilot entry already covers this time window,
   // skip entirely — the user has already dealt with this meeting manually.
+  // Same fallback: match on start only if the end has shifted.
   if (draft.startDatetime && draft.endDatetime) {
-    const alreadyHandled = existingEntries.find(
+    let alreadyHandled = existingEntries.find(
       (e) =>
         e.event_id === resolvedTaskId &&
         isCopilotEntry(e.description) &&
@@ -227,6 +251,21 @@ async function writeOrUpdateEntry(
         sameInstant(e.start_datetime, draft.startDatetime!) &&
         sameInstant(e.end_datetime, draft.endDatetime!)
     );
+
+    if (!alreadyHandled) {
+      const startCandidates = existingEntries.filter(
+        (e) =>
+          e.event_id === resolvedTaskId &&
+          isCopilotEntry(e.description) &&
+          !isOverwritable(e.description) &&
+          e.start_datetime != null &&
+          sameInstant(e.start_datetime, draft.startDatetime!)
+      );
+      if (startCandidates.length === 1) {
+        alreadyHandled = startCandidates[0];
+      }
+    }
+
     if (alreadyHandled) {
       return {
         eventTitle: draft.eventTitle,
