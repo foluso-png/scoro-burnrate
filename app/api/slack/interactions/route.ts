@@ -32,6 +32,11 @@ import { PhaseCache, resolveTaskForPhase } from "@/lib/scoro-phases";
 import { loadPhaseMemory, phaseMemoryKey, savePhaseMapping } from "@/lib/phase-memory";
 import { isDemoMode, DEMO_BANNER } from "@/lib/user-prefs";
 
+// Allow up to 60s for the after() callback that writes to Scoro.
+// A heavy day (~8 entries) makes ~25 Scoro API calls at 200-500ms each.
+// Default on Hobby is 10s, Pro is 15s — both too tight.
+export const maxDuration = 60;
+
 // ---------------------------------------------------------------------------
 // Slack request signature verification
 // ---------------------------------------------------------------------------
@@ -94,6 +99,36 @@ async function postBlocksToResponseUrl(
   });
   if (!res.ok) {
     throw new Error(`Slack response_url returned ${res.status}`);
+  }
+}
+
+async function replaceOriginalMessage(
+  responseUrl: string,
+  text: string,
+  blocks?: Record<string, unknown>[]
+): Promise<boolean> {
+  try {
+    const body: Record<string, unknown> = { replace_original: true, text };
+    if (blocks) body.blocks = blocks;
+
+    const res = await fetch(responseUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "no body");
+      console.error(
+        `[replace-msg] Failed to replace original message: ${res.status} — ${detail}`
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(
+      `[replace-msg] Network error replacing message: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return false;
   }
 }
 
@@ -247,24 +282,48 @@ async function handleLooksRight(
     return;
   }
 
+  // Remove buttons immediately so the user can't double-tap
+  const count = approvedDrafts.length;
+  await replaceOriginalMessage(
+    responseUrl,
+    `\u23f3 Writing ${count} ${count === 1 ? "entry" : "entries"} to Scoro...`
+  );
+
   try {
     // Write all approved drafts to Scoro (the slow part)
     let results: Awaited<ReturnType<typeof finaliseAndWrite>>;
+    const writeStart = Date.now();
     try {
       results = await finaliseAndWrite(convo, prefs.scoroUserId);
     } catch (err) {
       if (err instanceof DemoModeBlockedError) {
         await saveMemoryForDrafts(userId, approvedDrafts);
         await clearConversation(userId);
-        const count = approvedDrafts.length;
-        await postToResponseUrl(
-          responseUrl,
-          DEMO_BANNER + `${count} ${count === 1 ? "entry" : "entries"} matched but nothing was saved to Scoro.`
-        );
+        const demoMsg = DEMO_BANNER + `${count} ${count === 1 ? "entry" : "entries"} matched but nothing was saved to Scoro.`;
+        if (!await replaceOriginalMessage(responseUrl, demoMsg)) {
+          await postToResponseUrl(responseUrl, demoMsg);
+        }
         return;
       }
-      throw err;
+      const failMs = Date.now() - writeStart;
+      console.error(
+        `[looks-right] finaliseAndWrite failed after ${failMs}ms for ${approvedDrafts.length} entries (user ${userId}): ${err instanceof Error ? err.message : String(err)}`
+      );
+      const errorMsg = "\u274c Something went wrong writing to Scoro. Some entries may have been saved. Check Scoro before re-running.";
+      const errorReplaced = await replaceOriginalMessage(responseUrl, errorMsg, [
+        { type: "section", text: { type: "mrkdwn", text: errorMsg } },
+        buildActionButtons(),
+      ]);
+      if (!errorReplaced) {
+        await postResponseWithButtons(responseUrl, errorMsg);
+      }
+      return;
     }
+
+    const writeMs = Date.now() - writeStart;
+    console.log(
+      `[looks-right] finaliseAndWrite took ${writeMs}ms for ${approvedDrafts.length} entries (user ${userId})`
+    );
 
     // Save confirmed event→project mappings for future memory
     await saveMemoryForDrafts(userId, approvedDrafts);
@@ -296,7 +355,21 @@ async function handleLooksRight(
 
     summary += "\n\nAll done. Have a good evening!";
 
-    await postToResponseUrl(responseUrl, summary);
+    // Replace the "writing..." message with the final result
+    if (!await replaceOriginalMessage(responseUrl, summary)) {
+      await postToResponseUrl(responseUrl, summary);
+    }
+  } catch (err) {
+    // The Scoro write itself is caught above. If we reach here, the write
+    // succeeded but something after it failed (memory save, conversation
+    // clear, summary formatting). The entries ARE in Scoro.
+    console.error(
+      `[looks-right] Post-write error for ${userId}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    const postWriteMsg = "\u26a0\ufe0f Your entries were saved to Scoro, but something went wrong afterwards. Check Scoro before re-running.";
+    if (!await replaceOriginalMessage(responseUrl, postWriteMsg)) {
+      await postToResponseUrl(responseUrl, postWriteMsg);
+    }
   } finally {
     await releaseWriteLock(userId);
   }
