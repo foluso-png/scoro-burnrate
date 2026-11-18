@@ -1400,32 +1400,45 @@ async function handleAnnualLeave(
 // ---------------------------------------------------------------------------
 // Day catch-up — "go back to Monday", "catch up on Tuesday", etc.
 // ---------------------------------------------------------------------------
-const DAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-const CATCHUP_PATTERN =
-  /\b(?:go back to|catch up on|do|run|show me|redo)\b.*?\b(monday|tuesday|wednesday|thursday|friday)\b/i;
+const DAY_ABBREVS: Record<string, number> = {
+  monday: 1, mon: 1,
+  tuesday: 2, tue: 2, tues: 2,
+  wednesday: 3, wed: 3, weds: 3,
+  thursday: 4, thu: 4, thur: 4, thurs: 4,
+  friday: 5, fri: 5,
+};
+const DAY_NAME_PATTERN = Object.keys(DAY_ABBREVS).sort((a, b) => b.length - a.length).join("|");
+const CATCHUP_PATTERN = new RegExp(
+  `\\b(?:go back to|catch up on|do|run|show me|redo|log)\\b.*?\\b(${DAY_NAME_PATTERN})\\b`, "i"
+);
 
-function parseCatchUpDay(text: string): Date | null {
+type CatchUpResult =
+  | { status: "ok"; date: Date }
+  | { status: "today"; dayName: string }
+  | { status: "future"; dayName: string }
+  | null;
+
+function parseCatchUpDay(text: string): CatchUpResult {
   const match = CATCHUP_PATTERN.exec(text);
   if (!match) return null;
 
-  const dayName = match[1].toLowerCase();
-  const targetDow = DAY_NAMES.indexOf(dayName);
-  if (targetDow === -1) return null;
+  const input = match[1].toLowerCase();
+  const targetDow = DAY_ABBREVS[input];
+  if (targetDow === undefined) return null;
 
-  // Find that day within the current Mon-Sun week
+  const fullName = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"][targetDow] || input;
   const now = new Date();
   const currentDow = now.getDay(); // 0=Sun, 1=Mon, ...
   const todayDow = currentDow === 0 ? 7 : currentDow; // shift to Mon=1..Sun=7
-  const targetShifted = targetDow === 0 ? 7 : targetDow;
 
-  // Only allow past days within the same Mon-Sun week
-  if (targetShifted >= todayDow) return null; // can't catch up on today or future
+  if (targetDow === todayDow) return { status: "today", dayName: fullName };
+  if (targetDow > todayDow) return { status: "future", dayName: fullName };
 
-  const diff = todayDow - targetShifted;
+  const diff = todayDow - targetDow;
   const target = new Date(now);
   target.setDate(target.getDate() - diff);
   target.setHours(0, 0, 0, 0);
-  return target;
+  return { status: "ok", date: target };
 }
 
 function formatDateStr(d: Date): string {
@@ -1784,9 +1797,25 @@ export async function POST(request: NextRequest) {
       if (await handleAnnualLeave(userId, channelId, text)) return;
 
       // Check for day catch-up ("go back to Monday", etc.)
-      const catchUpDate = parseCatchUpDay(text);
-      if (catchUpDate) {
-        await handleCatchUp(userId, channelId, catchUpDate);
+      const catchUp = parseCatchUpDay(text);
+      if (catchUp?.status === "ok") {
+        await handleCatchUp(userId, channelId, catchUp.date);
+        return;
+      }
+      if (catchUp?.status === "today") {
+        await postSlackReply(
+          channelId,
+          [{ type: "section", text: { type: "mrkdwn", text: `That's today. Just say *log my day*.` } }],
+          "That's today"
+        );
+        return;
+      }
+      if (catchUp?.status === "future") {
+        await postSlackReply(
+          channelId,
+          [{ type: "section", text: { type: "mrkdwn", text: `${catchUp.dayName} hasn't happened yet.` } }],
+          "Future day"
+        );
         return;
       }
 
