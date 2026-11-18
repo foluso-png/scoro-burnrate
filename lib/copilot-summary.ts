@@ -45,6 +45,7 @@ interface GCalEvent {
   start?: { dateTime?: string; date?: string };
   end?: { dateTime?: string; date?: string };
   attendees?: Array<{ email: string; self?: boolean }>;
+  eventType?: string; // "default" | "outOfOffice" | "focusTime" | "workingLocation"
 }
 
 interface CalendarEvent {
@@ -97,7 +98,7 @@ async function fetchDayEvents(
   accessToken: string,
   cutoff: Date,
   targetDate?: Date
-): Promise<{ events: CalendarEvent[]; laterTodayCount: number }> {
+): Promise<{ events: CalendarEvent[]; laterTodayCount: number; allDayCount: number; workAllDayCount: number }> {
   const dayRef = targetDate || cutoff;
   const startOfDay = new Date(
     dayRef.getFullYear(),
@@ -126,6 +127,14 @@ async function fetchDayEvents(
   const data = await res.json();
   const items: GCalEvent[] = data.items || [];
 
+  const allDayItems = items.filter((e) => !e.start?.dateTime || !e.end?.dateTime);
+  const allDayCount = allDayItems.length;
+  // All-day events that are not outOfOffice or focusTime may be real work
+  const NON_WORK_TYPES = new Set(["outofoffice", "focustime"]);
+  const workAllDayCount = allDayItems.filter(
+    (e) => !NON_WORK_TYPES.has((e.eventType || "default").toLowerCase())
+  ).length;
+
   const allEvents = items
     .filter((e) => e.start?.dateTime && e.end?.dateTime)
     .map((e, i) => {
@@ -148,11 +157,11 @@ async function fetchDayEvents(
 
   // For past dates, return everything. For today, split at cutoff.
   if (targetDate) {
-    return { events: allEvents, laterTodayCount: 0 };
+    return { events: allEvents, laterTodayCount: 0, allDayCount, workAllDayCount };
   }
   const cutoffMs = cutoff.getTime();
   const events = allEvents.filter((e) => new Date(e.start).getTime() < cutoffMs);
-  return { events, laterTodayCount: allEvents.length - events.length };
+  return { events, laterTodayCount: allEvents.length - events.length, allDayCount, workAllDayCount };
 }
 
 // ---------------------------------------------------------------------------
@@ -872,7 +881,11 @@ export async function runCopilotSummary(
   const accessToken = await getAccessToken(slackId);
 
   // 2. Fetch calendar events (for targetDate or today)
-  const { events, laterTodayCount } = await fetchDayEvents(accessToken, cutoff, options.targetDate);
+  const { events, laterTodayCount, allDayCount, workAllDayCount } = await fetchDayEvents(accessToken, cutoff, options.targetDate);
+
+  if (allDayCount > 0) {
+    console.log(`[drop-count] ${allDayCount} all-day event(s) excluded, ${workAllDayCount} potentially work (user ${slackId})`);
+  }
 
   const displayDate = (options.targetDate || new Date()).toLocaleDateString(
     "en-GB",
@@ -1146,6 +1159,16 @@ export async function runCopilotSummary(
     });
   }
 
+  // 6b2. Note all-day events that may be work
+  if (workAllDayCount > 0) {
+    const noun = workAllDayCount === 1 ? "all-day event" : "all-day events";
+    const pronoun = workAllDayCount === 1 ? "it" : "them";
+    blocks.push({
+      type: "context",
+      elements: [{ type: "mrkdwn", text: `_You also had ${workAllDayCount} ${noun}. Use Add time if you need to log ${pronoun}._` }],
+    });
+  }
+
   // 6c. Append a rotating sign-off message
   const totalMinutes = events.reduce((sum, e) => {
     const ms = new Date(e.end).getTime() - new Date(e.start).getTime();
@@ -1180,6 +1203,10 @@ export async function runCopilotSummary(
   }));
   // Only create drafts for trackable events (non-trackable are excluded entirely)
   const trackableMatches = matches.filter((m) => m.is_trackable !== false);
+  const nonTrackableCount = matches.length - trackableMatches.length;
+  if (nonTrackableCount > 0) {
+    console.log(`[drop-count] ${nonTrackableCount} event(s) excluded as non-trackable (user ${slackId})`);
+  }
   const drafts: DraftEntry[] = trackableMatches.map((m) => {
     const event = events.find((e) => e.id === m.event_id);
     return {
