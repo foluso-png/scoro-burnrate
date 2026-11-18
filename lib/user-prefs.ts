@@ -21,6 +21,10 @@ export interface UserPrefs {
   hasReceivedWelcome: boolean;
   /** Demo mode: full Slack flow runs but all Scoro writes are blocked. */
   demoMode?: boolean;
+  /** ISO timestamp of when notifications were paused. Null when not paused. */
+  pausedAt?: string | null;
+  /** ISO date (YYYY-MM-DD) when we last notified this user about an expired Google token. */
+  lastAuthFailureNotified?: string | null;
 }
 
 const DEFAULT_PREFS: UserPrefs = {

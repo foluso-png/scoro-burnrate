@@ -215,6 +215,7 @@ export async function GET(request: NextRequest) {
 
     if (scoroUserId) {
       prefs.scoroUserId = scoroUserId;
+      prefs.lastAuthFailureNotified = null;
       await saveUserPrefs(slackId, prefs);
 
       // Send one-time welcome DM (only on first connect, not reconnects)
@@ -227,6 +228,8 @@ export async function GET(request: NextRequest) {
     } else {
       // Scoro account not found — warn but don't block the connection
       console.warn(`No Scoro user found for ${email}`);
+      prefs.lastAuthFailureNotified = null;
+      await saveUserPrefs(slackId, prefs);
       await sendSlackDM(
         slackId,
         `I've connected your Google Calendar, but I couldn't find a Scoro account matching ${email}. Ask Foluso to set your Scoro user ID manually so I can start logging your time.`

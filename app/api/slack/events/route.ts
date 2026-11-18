@@ -753,6 +753,7 @@ async function handlePauseResume(
   if (PAUSE_PATTERN.test(text)) {
     const prefs = await loadUserPrefs(userId);
     prefs.paused = true;
+    prefs.pausedAt = new Date().toISOString();
     await saveUserPrefs(userId, prefs);
     await postSlackReply(
       channelId,
@@ -764,6 +765,7 @@ async function handlePauseResume(
   if (RESUME_PATTERN.test(text)) {
     const prefs = await loadUserPrefs(userId);
     prefs.paused = false;
+    prefs.pausedAt = null;
     await saveUserPrefs(userId, prefs);
     const hour = prefs.deliveryHour;
     const timeStr = `${hour % 12 || 12}${hour < 12 ? "am" : "pm"}`;

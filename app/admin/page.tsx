@@ -101,6 +101,11 @@ export default async function AdminPage({
                       {u.prefs.paused ? (
                         <span className="text-amber-700 bg-amber-50 px-2 py-0.5 rounded text-xs font-medium">
                           Paused
+                          {u.prefs.pausedAt && (
+                            <span className="font-normal ml-1">
+                              since {formatTimestamp(u.prefs.pausedAt)}
+                            </span>
+                          )}
                         </span>
                       ) : (
                         formatHour(u.prefs.deliveryHour)
