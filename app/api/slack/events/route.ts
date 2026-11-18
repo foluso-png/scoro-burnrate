@@ -1084,28 +1084,45 @@ async function handleHowItWorks(
 
   const helpText = `*Here's everything I can do:*
 
-*The daily summary* \u2014 around 5pm I check your calendar and send a draft. You'll see four buttons:
+*Your daily summary* \u2014 around 5pm I check your calendar and send you a draft. Four buttons:
 \u2705 *Looks right* \u2014 saves it to Scoro
-\u2795 *Add time* \u2014 log something extra, e.g. "30 mins internal admin and 1 hour with Joe"
+\u2795 *Add time* \u2014 log something that wasn't in your calendar, e.g. "30 mins internal admin and 1 hour with Joe"
 \u270f\ufe0f *Fix an entry* \u2014 correct anything wrong, e.g. "the Nicola call was 45 minutes, not 30"
-\ud83d\udcdd *Log my day* \u2014 get your summary on demand, any time
+\ud83d\udcdd *Log my day* \u2014 get your draft any time, not just at 5pm
 
-*Things you can just say to me:*
+*Missed a day?* Say *"catch up on Monday"* or *"go back to Tuesday"*. Works for any earlier day this week. Use the full day name, "Mon" won't work.
+
+*Other things you can say:*
+\u2022 "Log my day" \u2014 same as the button, whenever you like
 \u2022 "Send my summary at 6pm" \u2014 change your delivery time
 \u2022 "Stop notifications" / "Start notifications" \u2014 pause or resume
-\u2022 "Set my role to [your role]" \u2014 update it if it changes
-\u2022 "Go back to Monday" \u2014 catch up on any earlier day in the current week (Monday through yesterday)
-\u2022 "I'm on annual leave [today/this week/Monday to Wednesday]" \u2014 log leave in Scoro
-\u2022 "Forget my [project] task" \u2014 clear a remembered project-task mapping so I ask again
+\u2022 "Set my role to [your role]" \u2014 needs to start with set, change or update
+\u2022 "I'm on annual leave today" \u2014 also "this week" or "Monday to Wednesday"
+\u2022 "Forget my [project] task" \u2014 clears a remembered project so I ask again
 
 *Worth knowing:*
-\ud83d\udc40 I review your calendar once a day, no live tracking
-\u2705 Nothing's ever submitted without you confirming it
-\ud83d\udeab Personal events like lunch are automatically left out`;
+\ud83d\udc40 I look at your calendar when you ask. No live tracking.
+\u2705 Nothing reaches Scoro until you tap Looks right.
+\ud83d\udeab Lunch and personal events are left out, and I'll tell you which ones.
+\ud83d\udcc5 All-day events aren't logged automatically. If you worked on one, use Add time.
+
+_Type "help" any time to see this again._`;
 
   await postSlackReply(
     channelId,
-    [{ type: "section", text: { type: "mrkdwn", text: helpText } }],
+    [
+      { type: "section", text: { type: "mrkdwn", text: helpText } },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "\ud83c\udd98 Ask Foluso", emoji: true },
+            action_id: "ask_admin",
+          },
+        ],
+      },
+    ],
     "How it works"
   );
   return true;

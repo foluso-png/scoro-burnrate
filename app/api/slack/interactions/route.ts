@@ -18,6 +18,8 @@ import { saveEventMapping } from "@/lib/event-memory";
 import { getProjectLookup, taskMatchesRole } from "@/lib/matcher";
 import { saveActivityMapping, loadActivityMemory } from "@/lib/activity-memory";
 import { loadUserPrefs } from "@/lib/user-prefs";
+import { loadLastRun } from "@/lib/last-run";
+import { getRedis } from "@/lib/redis";
 import {
   loadProjectTaskMemory,
   saveProjectTaskMapping,
@@ -1355,6 +1357,83 @@ async function handleRejectLeave(
 }
 
 // ---------------------------------------------------------------------------
+// "Ask Foluso" — ping the admin with diagnostic context
+// ---------------------------------------------------------------------------
+async function handleAskAdmin(
+  userId: string,
+  responseUrl: string
+): Promise<void> {
+  const confirmText = "Sent. Foluso's been pinged and will come back to you.";
+
+  const adminSlackId = process.env.ADMIN_SLACK_ID;
+  if (!adminSlackId) {
+    console.error("ask_admin: ADMIN_SLACK_ID is not set — cannot forward help request");
+    await postSlackDm(userId, confirmText);
+    return;
+  }
+
+  // Throttle: one ping per user per hour
+  const redis = await getRedis();
+  const throttleKey = `ask_admin_last:${userId}`;
+  const lastPing = await redis.get<string>(throttleKey);
+  const now = Date.now();
+  const ONE_HOUR = 3_600_000;
+
+  if (lastPing && now - Number(lastPing) < ONE_HOUR) {
+    await postSlackDm(userId, confirmText);
+    return;
+  }
+
+  // Gather diagnostic context
+  const [prefs, lastRun] = await Promise.all([
+    loadUserPrefs(userId),
+    loadLastRun(userId),
+  ]);
+
+  const lines = [
+    `<@${userId}> asked for help`,
+    `Paused: ${prefs.paused ? "yes" : "no"}${prefs.pausedAt ? ` (since ${prefs.pausedAt})` : ""}`,
+    `Last summary sent: ${prefs.lastSummarySentDate || "never"}`,
+  ];
+
+  if (lastRun) {
+    let runLine = `Last run: ${lastRun.status} at ${lastRun.timestamp}`;
+    if (lastRun.error) runLine += ` — ${lastRun.error}`;
+    lines.push(runLine);
+  } else {
+    lines.push("Last run: no record");
+  }
+
+  const slackToken = process.env.SLACK_BOT_TOKEN;
+  let pinged = false;
+  if (slackToken) {
+    try {
+      const res = await fetch("https://slack.com/api/chat.postMessage", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${slackToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          channel: adminSlackId,
+          text: lines.join("\n"),
+        }),
+      });
+      pinged = res.ok;
+    } catch (err) {
+      console.error("ask_admin: failed to DM admin:", err);
+    }
+  }
+
+  // Only throttle if the DM actually went through
+  if (pinged) {
+    await redis.set(throttleKey, String(now), { ex: 3600 });
+  }
+
+  await postSlackDm(userId, confirmText);
+}
+
+// ---------------------------------------------------------------------------
 // POST handler — acknowledge immediately, defer work with after()
 // ---------------------------------------------------------------------------
 export async function POST(request: NextRequest) {
@@ -1485,6 +1564,9 @@ export async function POST(request: NextRequest) {
           break;
         case "reject_leave":
           await handleRejectLeave(userId, responseUrl);
+          break;
+        case "ask_admin":
+          await handleAskAdmin(userId, responseUrl);
           break;
         default:
           console.warn(`Unknown action_id: ${actionId}`);
