@@ -46,6 +46,7 @@ interface GCalEvent {
   end?: { dateTime?: string; date?: string };
   attendees?: Array<{ email: string; self?: boolean }>;
   eventType?: string; // "default" | "outOfOffice" | "focusTime" | "workingLocation"
+  transparency?: string; // "opaque" (default, blocks time) | "transparent" (doesn't block time)
 }
 
 interface CalendarEvent {
@@ -129,10 +130,13 @@ async function fetchDayEvents(
 
   const allDayItems = items.filter((e) => !e.start?.dateTime || !e.end?.dateTime);
   const allDayCount = allDayItems.length;
-  // All-day events that are not outOfOffice or focusTime may be real work
+  // All-day events that are not outOfOffice/focusTime and not transparent
+  // (transparent = doesn't block time, e.g. Deskbird desk/parking bookings)
   const NON_WORK_TYPES = new Set(["outofoffice", "focustime"]);
   const workAllDayCount = allDayItems.filter(
-    (e) => !NON_WORK_TYPES.has((e.eventType || "default").toLowerCase())
+    (e) =>
+      !NON_WORK_TYPES.has((e.eventType || "default").toLowerCase()) &&
+      (e.transparency || "opaque").toLowerCase() !== "transparent"
   ).length;
 
   const allEvents = items
