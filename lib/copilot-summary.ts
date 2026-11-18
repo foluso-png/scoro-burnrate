@@ -183,7 +183,8 @@ async function writeDraftsToScoro(
   slackUserId: string,
   events: CalendarEvent[],
   matches: MatchResult[],
-  scoroUserId: number
+  scoroUserId: number,
+  sharedPhaseCache?: PhaseCache
 ): Promise<{ written: WriteResult[]; skipped: MatchResult[] }> {
   await assertCanWrite(slackUserId);
 
@@ -202,7 +203,7 @@ async function writeDraftsToScoro(
       m.confidence === "low"
   );
 
-  const phaseCache = new PhaseCache();
+  const phaseCache = sharedPhaseCache || new PhaseCache();
   const written: WriteResult[] = [];
 
   for (const match of approved) {
@@ -785,6 +786,7 @@ export async function runCopilotSummary(
     skipDedupe?: boolean; // bypass the "already sent today" check (used by catch-up)
     stampEmpty?: boolean; // stamp lastSummarySentDate even when zero events (cron: true, manual: false)
     silentLeaveSkip?: boolean; // skip silently (no Slack message) when user is on leave (cron: true, manual: false)
+    phaseCache?: PhaseCache; // shared phase cache to avoid duplicate Scoro calls across users
   } = {}
 ): Promise<SummaryResult> {
   const { channelId = slackId, writeToScoro = true } = options;
@@ -1067,7 +1069,7 @@ export async function runCopilotSummary(
   }
 
   // 4d. Phase resolution: swap tasks to the correct phase for the entry date
-  const matchPhaseCache = new PhaseCache();
+  const matchPhaseCache = options.phaseCache || new PhaseCache();
   const phaseMem = await loadPhaseMemory(slackId);
   for (const m of matches) {
     if (m.project_id === null || m.task_id === null || !m.task_confident) continue;
@@ -1126,7 +1128,7 @@ export async function runCopilotSummary(
   let skipped: MatchResult[] = [];
 
   if (writeToScoro) {
-    const result = await writeDraftsToScoro(slackId, events, matches, scoroUserId);
+    const result = await writeDraftsToScoro(slackId, events, matches, scoroUserId, options.phaseCache);
     written = result.written;
     skipped = result.skipped;
   } else {

@@ -130,16 +130,23 @@ async function fetchProjectPhaseData(projectId: number): Promise<ProjectPhaseDat
  * multiple entries target the same project.
  */
 export class PhaseCache {
-  private cache = new Map<number, ProjectPhaseData>();
+  private cache = new Map<number, Promise<ProjectPhaseData>>();
 
   async get(projectId: number): Promise<ProjectPhaseData> {
-    const cached = this.cache.get(projectId);
-    if (cached) return cached;
+    const existing = this.cache.get(projectId);
+    if (existing) return existing;
 
-    // fetchProjectPhaseData throws on API failure — let it propagate
-    const data = await fetchProjectPhaseData(projectId);
-    this.cache.set(projectId, data);
-    return data;
+    // Store the promise, not the result. Concurrent callers for the same
+    // project await the same in-flight fetch instead of duplicating it.
+    const pending = fetchProjectPhaseData(projectId);
+    this.cache.set(projectId, pending);
+    try {
+      return await pending;
+    } catch (err) {
+      // Don't cache failures — allow retry on next access
+      this.cache.delete(projectId);
+      throw err;
+    }
   }
 }
 

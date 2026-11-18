@@ -11,6 +11,11 @@ import { listRegisteredUsers } from "@/lib/google-auth";
 import { getProjectLookup } from "@/lib/matcher";
 import { saveLastRun } from "@/lib/last-run";
 import { loadUserPrefs, saveUserPrefs, todayLondon } from "@/lib/user-prefs";
+import { PhaseCache } from "@/lib/scoro-phases";
+
+export const maxDuration = 300;
+
+const USER_CONCURRENCY = 5;
 
 // ---------------------------------------------------------------------------
 // Auth failure notification — DM the user, but no more than once per 7 days
@@ -166,7 +171,7 @@ export async function GET(request: NextRequest) {
   if (!process.env.ADMIN_SLACK_ID) {
     console.error("run-copilot: ADMIN_SLACK_ID is not set — project lookup failures will not be reported to anyone");
   }
-  let projectLookup;
+  let projectLookup: Awaited<ReturnType<typeof getProjectLookup>>;
   try {
     projectLookup = await getProjectLookup();
   } catch {
@@ -206,14 +211,17 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // 4. Process each eligible user independently
+  // 4. Process eligible users concurrently with a shared phase cache
+  const startMs = Date.now();
+  const phaseCache = new PhaseCache();
   const results: UserRunResult[] = [...skippedResults];
 
-  for (const slackId of eligible) {
+  async function processUser(slackId: string): Promise<UserRunResult> {
     try {
       const result: SummaryResult = await runCopilotSummary(slackId, {
         writeToScoro: false,
         projectLookup,
+        phaseCache,
         stampEmpty: true,
         silentLeaveSkip: true,
       });
@@ -224,7 +232,7 @@ export async function GET(request: NextRequest) {
         entryCount: result.matched,
       });
 
-      results.push({
+      return {
         slackId,
         status: "ok",
         eventCount: result.eventCount,
@@ -232,7 +240,7 @@ export async function GET(request: NextRequest) {
         failed: result.failed,
         skipped: result.skipped,
         slackStatus: result.slackStatus,
-      });
+      };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`run-copilot: user ${slackId} failed:`, message);
@@ -242,7 +250,7 @@ export async function GET(request: NextRequest) {
         status: "error",
         entryCount: 0,
         error: message,
-      }).catch(() => {}); // don't let logging fail the loop
+      }).catch(() => {});
 
       const isAuthFailure =
         message.includes("Token refresh failed") ||
@@ -254,20 +262,78 @@ export async function GET(request: NextRequest) {
         });
       }
 
-      results.push({
-        slackId,
-        status: "error",
-        error: message,
-      });
+      return { slackId, status: "error", error: message };
     }
   }
 
+  // Concurrency-limited pool: run up to USER_CONCURRENCY users at a time.
+  // Before dequeuing each user, check elapsed time. If we're past the
+  // safety margin, stop early so we can report rather than being killed.
+  const BAIL_AFTER_MS = 270_000; // 270s — leave 30s headroom before the 300s timeout
+  const queue = [...eligible];
+  const skippedByTimeout: string[] = [];
+  const running: Promise<void>[] = [];
+
+  async function next(): Promise<void> {
+    while (queue.length > 0) {
+      if (Date.now() - startMs > BAIL_AFTER_MS) {
+        // Drain remaining queue into skippedByTimeout
+        skippedByTimeout.push(...queue.splice(0));
+        return;
+      }
+      const slackId = queue.shift()!;
+      const result = await processUser(slackId);
+      results.push(result);
+    }
+  }
+
+  for (let i = 0; i < Math.min(USER_CONCURRENCY, queue.length); i++) {
+    running.push(next());
+  }
+  await Promise.all(running);
+
+  // 5. Timing and alerting
+  const durationMs = Date.now() - startMs;
+  const durationSec = Math.round(durationMs / 1000);
   const succeeded = results.filter((r) => r.status === "ok").length;
   const errored = results.filter((r) => r.status === "error").length;
 
+  console.log(
+    `run-copilot: hour ${currentHour}, ${eligible.length} eligible, ${succeeded} ok, ${errored} errors, ${skippedByTimeout.length} timed out, ${durationSec}s`
+  );
+
+  if (durationSec > 240) {
+    console.warn(
+      `run-copilot: run took ${durationSec}s — approaching the 300s timeout`
+    );
+  }
+
+  if (skippedByTimeout.length > 0) {
+    console.error(
+      `run-copilot: ran out of time, ${skippedByTimeout.length} users skipped: ${skippedByTimeout.join(", ")}`
+    );
+
+    const adminSlackId = process.env.ADMIN_SLACK_ID;
+    const slackToken = process.env.SLACK_BOT_TOKEN;
+    if (adminSlackId && slackToken) {
+      await fetch("https://slack.com/api/chat.postMessage", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${slackToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          channel: adminSlackId,
+          text: `Cron ran out of time: ${skippedByTimeout.length} of ${eligible.length} users didn't get their summary. ${succeeded} ok, ${errored} errors. Run took ${durationSec}s.`,
+        }),
+      }).catch(() => {});
+    }
+  }
+
   return NextResponse.json({
-    message: `Hour ${currentHour}: ${eligible.length} eligible, ${succeeded} ok, ${errored} failed`,
+    message: `Hour ${currentHour}: ${eligible.length} eligible, ${succeeded} ok, ${errored} failed, ${skippedByTimeout.length} timed out in ${durationSec}s`,
     hour: currentHour,
+    durationSeconds: durationSec,
     users: results,
   });
 }
