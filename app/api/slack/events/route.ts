@@ -23,7 +23,6 @@ import {
 import {
   runCopilotSummary,
   checkScoroEntriesForDate,
-  checkWeekSubmitted,
 } from "@/lib/copilot-summary";
 import { finaliseAndWrite } from "@/lib/scoro-writer";
 import {
@@ -1441,49 +1440,13 @@ async function handleLogMyWeek(
     return;
   }
 
-  // Check week submission once (same answer for every day in the week)
-  const weekCheck = await checkWeekSubmitted(remaining[0].dateStr, prefs.scoroUserId);
-  if (weekCheck.error) {
-    await postSlackReply(
-      channelId,
-      [{ type: "section", text: { type: "mrkdwn", text: "Couldn't check Scoro. Try again in a minute." } }],
-      "Scoro check failed"
-    );
-    return;
-  }
-  if (weekCheck.submitted) {
-    await postSlackReply(
-      channelId,
-      [{ type: "section", text: { type: "mrkdwn", text: "This week's already submitted in Scoro." } }],
-      "Week submitted"
-    );
-    return;
-  }
+  // logged_dates tracks which days we've already written. No Scoro entry
+  // check here — /timeEntries/list ignores date filters, so the old check
+  // always returned true. The duplicate guard in finaliseAndWrite handles
+  // anything written outside the Co-pilot.
+  const first = remaining[0];
 
-  // Find the first day that doesn't already have entries in Scoro
-  let target: (typeof remaining)[0] | null = null;
-  for (const day of remaining) {
-    if (day.isToday) { target = day; break; }
-
-    const check = await checkScoroEntriesForDate(day.dateStr, prefs.scoroUserId);
-    if (check.error) {
-      await postSlackReply(
-        channelId,
-        [{ type: "section", text: { type: "mrkdwn", text: "Couldn't check Scoro. Try again in a minute." } }],
-        "Scoro check failed"
-      );
-      return;
-    }
-    if (check.hasEntries) {
-      await recordLoggedDate(userId, day.dateStr);
-      continue;
-    }
-
-    target = day;
-    break;
-  }
-
-  if (!target) {
+  if (!first) {
     await postSlackReply(
       channelId,
       [{ type: "section", text: { type: "mrkdwn", text: "You're all caught up. Nothing left to log this week." } }],
@@ -1491,6 +1454,8 @@ async function handleLogMyWeek(
     );
     return;
   }
+
+  const target = first;
 
   const dayLabel = target.date.toLocaleDateString("en-GB", { weekday: "long" });
   await postSlackReply(
@@ -1593,64 +1558,9 @@ async function handleCatchUp(
     return;
   }
 
-  const SCORO_CHECK_FAILED_MSG =
-    "Couldn't verify Scoro for that date, so I won't risk a duplicate. Please check manually.";
-
-  // Check if entries already exist for that day
-  const entriesCheck = await checkScoroEntriesForDate(dateStr, catchUpPrefs.scoroUserId);
-  if (entriesCheck.error) {
-    await postSlackReply(
-      channelId,
-      [{ type: "section", text: { type: "mrkdwn", text: SCORO_CHECK_FAILED_MSG } }],
-      "Scoro check failed"
-    );
-    return;
-  }
-  if (entriesCheck.hasEntries) {
-    await postSlackReply(
-      channelId,
-      [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `You've already got entries logged for ${dayLabel}. I can't touch those; check Scoro directly if something's wrong there.`,
-          },
-        },
-      ],
-      `Entries already exist for ${dayLabel}`
-    );
-    return;
-  }
-
-  // Check if the week has been submitted
-  const weekCheck = await checkWeekSubmitted(dateStr, catchUpPrefs.scoroUserId);
-  if (weekCheck.error) {
-    await postSlackReply(
-      channelId,
-      [{ type: "section", text: { type: "mrkdwn", text: SCORO_CHECK_FAILED_MSG } }],
-      "Scoro check failed"
-    );
-    return;
-  }
-  if (weekCheck.submitted) {
-    await postSlackReply(
-      channelId,
-      [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: "This week's already submitted in Scoro, so I can't add anything to it.",
-          },
-        },
-      ],
-      "Week already submitted"
-    );
-    return;
-  }
-
-  // All clear — run the summary for that date
+  // No Scoro entry or week-submission check here. /timeEntries/list ignores
+  // date filters (always returns true), and /timeSheets/list doesn't exist.
+  // The duplicate guard in finaliseAndWrite handles anything already written.
   await postThinking(channelId);
   try {
     await runCopilotSummary(userId, {

@@ -13,11 +13,7 @@ import {
   DraftEntry,
 } from "@/lib/conversation";
 import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
-import {
-  runCopilotSummary,
-  checkScoroEntriesForDate,
-  checkWeekSubmitted,
-} from "@/lib/copilot-summary";
+import { runCopilotSummary } from "@/lib/copilot-summary";
 import { recordLoggedDate, getRemainingWeekdays } from "@/lib/write-log";
 import { saveEventMapping } from "@/lib/event-memory";
 import { getProjectLookup, taskMatchesRole } from "@/lib/matcher";
@@ -241,9 +237,11 @@ async function postResponseWithButtons(
 // ---------------------------------------------------------------------------
 async function continueWeekRun(
   userId: string,
-  channelId: string,
-  scoroUserId: number
+  channelId: string
 ): Promise<void> {
+  // logged_dates tracks which days we've already written. No Scoro entry
+  // check — /timeEntries/list ignores date filters. The duplicate guard
+  // in finaliseAndWrite handles anything written outside the Co-pilot.
   const remaining = await getRemainingWeekdays(userId);
 
   if (remaining.length === 0) {
@@ -254,51 +252,7 @@ async function continueWeekRun(
     return;
   }
 
-  // Check week submission once (same answer for every day)
-  const weekCheck = await checkWeekSubmitted(remaining[0].dateStr, scoroUserId);
-  if (weekCheck.error) {
-    await postSlackDm(
-      channelId,
-      "Couldn't check Scoro for the next day. Try *log my week* again."
-    );
-    return;
-  }
-  if (weekCheck.submitted) {
-    await postSlackDm(
-      channelId,
-      "The week's already submitted in Scoro, so I can't add anything more."
-    );
-    return;
-  }
-
-  // Find the first remaining day without existing Scoro entries
-  let target: (typeof remaining)[0] | null = null;
-  for (const day of remaining) {
-    if (day.isToday) { target = day; break; }
-
-    const check = await checkScoroEntriesForDate(day.dateStr, scoroUserId);
-    if (check.error) {
-      await postSlackDm(
-        channelId,
-        "Couldn't check Scoro for the next day. Try *log my week* again."
-      );
-      return;
-    }
-    if (check.hasEntries) {
-      await recordLoggedDate(userId, day.dateStr);
-      continue;
-    }
-    target = day;
-    break;
-  }
-
-  if (!target) {
-    await postSlackDm(
-      channelId,
-      "You're all caught up. Nothing left to log this week."
-    );
-    return;
-  }
+  const target = remaining[0];
 
   const dayLabel = target.date.toLocaleDateString("en-GB", { weekday: "long" });
   await postSlackDm(channelId, `Now for ${dayLabel}...`);
@@ -472,7 +426,7 @@ async function handleLooksRight(
     // Week run: continue to the next day
     if (wasWeekRun && weekRunChannelId) {
       try {
-        await continueWeekRun(userId, weekRunChannelId, prefs.scoroUserId!);
+        await continueWeekRun(userId, weekRunChannelId);
       } catch (err) {
         console.error(
           `[week-run] continuation failed for ${userId}: ${err instanceof Error ? err.message : String(err)}`
