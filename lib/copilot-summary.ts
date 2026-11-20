@@ -714,10 +714,12 @@ export async function checkWeekSubmitted(
     const sheets = Array.isArray(res.data) ? res.data : [];
     return { submitted: sheets.length > 0, error: false };
   } catch (err) {
-    console.error(
+    // Fail open — /timeSheets/list doesn't exist in Scoro's API, so this
+    // always errors. If a week IS locked, Scoro rejects the write itself.
+    console.warn(
       `[checkWeekSubmitted] /timeSheets/list failed for user ${scoroUserId} on ${dateStr}: ${err instanceof Error ? err.message : String(err)}`
     );
-    return { submitted: false, error: true };
+    return { submitted: false, error: false };
   }
 }
 
