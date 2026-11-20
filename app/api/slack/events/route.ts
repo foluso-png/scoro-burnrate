@@ -35,12 +35,26 @@ import { loadUserPrefs, saveUserPrefs, todayLondon, isDemoMode, DEMO_BANNER } fr
 import { CAMPFIRE_ROLES } from "@/lib/roles";
 import { savePendingLeave } from "@/lib/pending-leave";
 import { DemoModeBlockedError } from "@/lib/demo-gate";
+import { recordLoggedDate, getRemainingWeekdays } from "@/lib/write-log";
 import { PhaseCache, resolveTaskForPhase } from "@/lib/scoro-phases";
 import { loadPhaseMemory, phaseMemoryKey } from "@/lib/phase-memory";
 import {
   loadProjectTaskMemory,
   deleteProjectTaskMapping,
 } from "@/lib/project-task-memory";
+
+// ---------------------------------------------------------------------------
+// Connect URL — derive from GOOGLE_REDIRECT_URI so it's never literal text
+// ---------------------------------------------------------------------------
+function connectUrl(): string {
+  const redirectUri = process.env.GOOGLE_REDIRECT_URI || "";
+  try {
+    const u = new URL(redirectUri);
+    return `${u.origin}/connect`;
+  } catch {
+    return "/connect";
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Slack request signature verification
@@ -1090,7 +1104,8 @@ async function handleHowItWorks(
 \u270f\ufe0f *Fix an entry* \u2014 correct anything wrong, e.g. "the Nicola call was 45 minutes, not 30"
 \ud83d\udcdd *Log my day* \u2014 get your draft any time, not just at 5pm
 
-*Missed a day?* Say *"catch up on Monday"* or *"go back to Tuesday"*. Works for any earlier day this week. Use the full day name, "Mon" won't work.
+*Missed a day?* Say *"catch up on Monday"* or *"go back to Tue"*. Works for any earlier day this week.
+*Missed the whole week?* Say *"log my week"* and I'll walk you through each day.
 
 *Other things you can say:*
 \u2022 "Log my day" \u2014 same as the button, whenever you like
@@ -1395,6 +1410,115 @@ async function handleAnnualLeave(
     `Log annual leave for ${label}?`
   );
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Week catch-up — "log my week", "do the week", etc.
+// ---------------------------------------------------------------------------
+const WEEK_PATTERN = /\b(?:log|do|run|show me|catch up on|redo)\b.*\b(?:my |the )?week\b/i;
+
+async function handleLogMyWeek(
+  userId: string,
+  channelId: string
+): Promise<void> {
+  const remaining = await getRemainingWeekdays(userId);
+  if (remaining.length === 0) {
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: "You're all caught up. Nothing left to log this week." } }],
+      "All caught up"
+    );
+    return;
+  }
+
+  const prefs = await loadUserPrefs(userId);
+  if (!prefs.scoroUserId) {
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: `Your Scoro user ID hasn't been set up yet. <${connectUrl()}|Reconnect> or ask Foluso to set it manually.` } }],
+      "Missing Scoro user ID"
+    );
+    return;
+  }
+
+  // Check week submission once (same answer for every day in the week)
+  const weekCheck = await checkWeekSubmitted(remaining[0].dateStr, prefs.scoroUserId);
+  if (weekCheck.error) {
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: "Couldn't check Scoro. Try again in a minute." } }],
+      "Scoro check failed"
+    );
+    return;
+  }
+  if (weekCheck.submitted) {
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: "This week's already submitted in Scoro." } }],
+      "Week submitted"
+    );
+    return;
+  }
+
+  // Find the first day that doesn't already have entries in Scoro
+  let target: (typeof remaining)[0] | null = null;
+  for (const day of remaining) {
+    if (day.isToday) { target = day; break; }
+
+    const check = await checkScoroEntriesForDate(day.dateStr, prefs.scoroUserId);
+    if (check.error) {
+      await postSlackReply(
+        channelId,
+        [{ type: "section", text: { type: "mrkdwn", text: "Couldn't check Scoro. Try again in a minute." } }],
+        "Scoro check failed"
+      );
+      return;
+    }
+    if (check.hasEntries) {
+      await recordLoggedDate(userId, day.dateStr);
+      continue;
+    }
+
+    target = day;
+    break;
+  }
+
+  if (!target) {
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: "You're all caught up. Nothing left to log this week." } }],
+      "All caught up"
+    );
+    return;
+  }
+
+  const dayLabel = target.date.toLocaleDateString("en-GB", { weekday: "long" });
+  await postSlackReply(
+    channelId,
+    [{ type: "section", text: { type: "mrkdwn", text: `Starting with ${dayLabel}...` } }],
+    `Week run: ${dayLabel}`
+  );
+
+  try {
+    if (target.isToday) {
+      await runCopilotSummary(userId, { channelId, writeToScoro: false, skipDedupe: true });
+    } else {
+      await runCopilotSummary(userId, { channelId, writeToScoro: false, targetDate: target.date });
+    }
+    const convo = await loadConversation(userId);
+    if (convo) {
+      convo.weekRun = true;
+      await saveConversation(convo);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[week-run] ${userId} failed on ${dayLabel}:`, msg);
+    await postSlackReply(
+      channelId,
+      [{ type: "section", text: { type: "mrkdwn", text: `Something went wrong running ${dayLabel}'s summary. Try *log my week* again.` } }],
+      "Week run error"
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1795,6 +1919,12 @@ export async function POST(request: NextRequest) {
       if (await handleForget(userId, channelId, text)) return;
       if (await handleHowItWorks(userId, channelId, text)) return;
       if (await handleAnnualLeave(userId, channelId, text)) return;
+
+      // Check for week catch-up ("log my week", etc.) — before day catch-up
+      if (WEEK_PATTERN.test(text)) {
+        await handleLogMyWeek(userId, channelId);
+        return;
+      }
 
       // Check for day catch-up ("go back to Monday", etc.)
       const catchUp = parseCatchUpDay(text);

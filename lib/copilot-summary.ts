@@ -1258,6 +1258,7 @@ export async function runCopilotSummary(
   convo.drafts = drafts;
   convo.slackChannelId = slackPost.channelId;
   convo.messageTs = slackPost.messageTs;
+  convo.entryDate = entryDateStr;
   await saveConversation(convo);
 
   // 8. Return result summary

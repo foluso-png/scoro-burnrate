@@ -69,6 +69,8 @@ export interface ConversationState {
   slackChannelId: string | null;        // DM channel for follow-up messages
   messageTs: string | null;             // timestamp of the last bot message (for updates)
   createdAt: string;                    // ISO timestamp
+  entryDate?: string;                   // YYYY-MM-DD date the entries are for
+  weekRun?: boolean;                    // true when part of a "log my week" walk-through
 }
 
 // ---------------------------------------------------------------------------

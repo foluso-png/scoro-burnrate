@@ -13,11 +13,16 @@ import {
   DraftEntry,
 } from "@/lib/conversation";
 import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
-import { runCopilotSummary } from "@/lib/copilot-summary";
+import {
+  runCopilotSummary,
+  checkScoroEntriesForDate,
+  checkWeekSubmitted,
+} from "@/lib/copilot-summary";
+import { recordLoggedDate, getRemainingWeekdays } from "@/lib/write-log";
 import { saveEventMapping } from "@/lib/event-memory";
 import { getProjectLookup, taskMatchesRole } from "@/lib/matcher";
 import { saveActivityMapping, loadActivityMemory } from "@/lib/activity-memory";
-import { loadUserPrefs } from "@/lib/user-prefs";
+import { loadUserPrefs, todayLondon } from "@/lib/user-prefs";
 import { loadLastRun } from "@/lib/last-run";
 import { getRedis } from "@/lib/redis";
 import {
@@ -232,6 +237,96 @@ async function postResponseWithButtons(
 }
 
 // ---------------------------------------------------------------------------
+// Week run continuation — after a day is approved, start the next one
+// ---------------------------------------------------------------------------
+async function continueWeekRun(
+  userId: string,
+  channelId: string,
+  scoroUserId: number
+): Promise<void> {
+  const remaining = await getRemainingWeekdays(userId);
+
+  if (remaining.length === 0) {
+    await postSlackDm(
+      channelId,
+      "You're all caught up. Nothing left to log this week."
+    );
+    return;
+  }
+
+  // Check week submission once (same answer for every day)
+  const weekCheck = await checkWeekSubmitted(remaining[0].dateStr, scoroUserId);
+  if (weekCheck.error) {
+    await postSlackDm(
+      channelId,
+      "Couldn't check Scoro for the next day. Try *log my week* again."
+    );
+    return;
+  }
+  if (weekCheck.submitted) {
+    await postSlackDm(
+      channelId,
+      "The week's already submitted in Scoro, so I can't add anything more."
+    );
+    return;
+  }
+
+  // Find the first remaining day without existing Scoro entries
+  let target: (typeof remaining)[0] | null = null;
+  for (const day of remaining) {
+    if (day.isToday) { target = day; break; }
+
+    const check = await checkScoroEntriesForDate(day.dateStr, scoroUserId);
+    if (check.error) {
+      await postSlackDm(
+        channelId,
+        "Couldn't check Scoro for the next day. Try *log my week* again."
+      );
+      return;
+    }
+    if (check.hasEntries) {
+      await recordLoggedDate(userId, day.dateStr);
+      continue;
+    }
+    target = day;
+    break;
+  }
+
+  if (!target) {
+    await postSlackDm(
+      channelId,
+      "You're all caught up. Nothing left to log this week."
+    );
+    return;
+  }
+
+  const dayLabel = target.date.toLocaleDateString("en-GB", { weekday: "long" });
+  await postSlackDm(channelId, `Now for ${dayLabel}...`);
+
+  try {
+    if (target.isToday) {
+      await runCopilotSummary(userId, { channelId, writeToScoro: false, skipDedupe: true });
+    } else {
+      await runCopilotSummary(userId, { channelId, writeToScoro: false, targetDate: target.date });
+    }
+
+    const convo = await loadConversation(userId);
+    if (convo) {
+      convo.weekRun = true;
+      await saveConversation(convo);
+    }
+  } catch (err) {
+    console.error(
+      `[week-run] ${userId} failed on ${dayLabel}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    await postSlackDm(
+      channelId,
+      `Something went wrong running ${dayLabel}'s summary. Try *log my week* again.`
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Button handlers — post results via response_url or chat.postMessage
 // ---------------------------------------------------------------------------
 function formatDuration(mins: number): string {
@@ -330,10 +425,20 @@ async function handleLooksRight(
     // Save confirmed event→project mappings for future memory
     await saveMemoryForDrafts(userId, approvedDrafts);
 
+    // Capture week-run state before clearing the conversation
+    const entryDate = convo.entryDate || todayLondon();
+    const wasWeekRun = convo.weekRun === true;
+    const weekRunChannelId = convo.slackChannelId;
+
     await clearConversation(userId);
 
     const written = results.filter((r) => !r.error && r.action !== "skipped" && r.action !== "skipped_demo" && r.action !== "failed");
     const failed = results.filter((r) => r.error);
+
+    // Record which date was logged (only when something was actually written)
+    if (written.length > 0) {
+      await recordLoggedDate(userId, entryDate);
+    }
 
     let summary = `\u2705 Done. ${written.length} ${written.length === 1 ? "entry" : "entries"} written to Scoro:\n`;
     summary += written
@@ -355,11 +460,28 @@ async function handleLooksRight(
       summary += `\n\n${userSkipped.map((r) => `\u2022 ${r.eventTitle}: ${r.skipReason}`).join("\n")}`;
     }
 
-    summary += "\n\nAll done. Have a good evening!";
+    if (!wasWeekRun) {
+      summary += "\n\nAll done. Have a good evening!";
+    }
 
     // Replace the "writing..." message with the final result
     if (!await replaceOriginalMessage(responseUrl, summary)) {
       await postToResponseUrl(responseUrl, summary);
+    }
+
+    // Week run: continue to the next day
+    if (wasWeekRun && weekRunChannelId) {
+      try {
+        await continueWeekRun(userId, weekRunChannelId, prefs.scoroUserId!);
+      } catch (err) {
+        console.error(
+          `[week-run] continuation failed for ${userId}: ${err instanceof Error ? err.message : String(err)}`
+        );
+        await postSlackDm(
+          weekRunChannelId,
+          "Something went wrong moving to the next day. Try *log my week* again."
+        );
+      }
     }
   } catch (err) {
     // The Scoro write itself is caught above. If we reach here, the write
