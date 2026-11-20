@@ -690,8 +690,10 @@ export async function checkScoroEntriesForDate(
     });
     const entries = Array.isArray(res.data) ? res.data : [];
     return { hasEntries: entries.length > 0, count: entries.length, error: false };
-  } catch {
-    // Fail closed — if we can't verify, block the flow to avoid duplicates
+  } catch (err) {
+    console.error(
+      `[checkScoroEntries] /timeEntries/list failed for user ${scoroUserId} on ${dateStr}: ${err instanceof Error ? err.message : String(err)}`
+    );
     return { hasEntries: false, count: 0, error: true };
   }
 }
@@ -711,9 +713,10 @@ export async function checkWeekSubmitted(
     });
     const sheets = Array.isArray(res.data) ? res.data : [];
     return { submitted: sheets.length > 0, error: false };
-  } catch {
-    // Fail closed — if we can't verify, block the flow to avoid duplicates
-    console.warn("Could not check timesheet submission status");
+  } catch (err) {
+    console.error(
+      `[checkWeekSubmitted] /timeSheets/list failed for user ${scoroUserId} on ${dateStr}: ${err instanceof Error ? err.message : String(err)}`
+    );
     return { submitted: false, error: true };
   }
 }
