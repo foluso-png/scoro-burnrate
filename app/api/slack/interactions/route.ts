@@ -16,7 +16,7 @@ import { finaliseAndWrite, updateExistingEntry } from "@/lib/scoro-writer";
 import { runCopilotSummary } from "@/lib/copilot-summary";
 import { recordLoggedDate, getRemainingWeekdays } from "@/lib/write-log";
 import { saveEventMapping } from "@/lib/event-memory";
-import { getProjectLookup, taskMatchesRole } from "@/lib/matcher";
+import { getProjectLookup, taskMatchesRole, filterTasksForUser } from "@/lib/matcher";
 import { saveActivityMapping, loadActivityMemory } from "@/lib/activity-memory";
 import { loadUserPrefs, todayLondon } from "@/lib/user-prefs";
 import { loadLastRun } from "@/lib/last-run";
@@ -800,15 +800,20 @@ async function handleSelectProject(
     return;
   }
 
-  // Task resolution: memory > defaultRole > single task > ask
-  let resolvedTask: (typeof project.tasks)[number] | null = project.tasks[0] || null;
-  let taskConfident = project.tasks.length <= 1;
+  // Task resolution: assignment filter > memory > defaultRole > single task > ask
+  const prefs = await loadUserPrefs(userId);
+  const candidateTasks = prefs.scoroUserId
+    ? filterTasksForUser(project.tasks, prefs.scoroUserId, projectId)
+    : project.tasks;
+
+  let resolvedTask: (typeof project.tasks)[number] | null = candidateTasks[0] || null;
+  let taskConfident = candidateTasks.length <= 1;
 
   // 1. Check project-task memory
   const projectTaskMem = await loadProjectTaskMemory(userId);
   const remembered = projectTaskMem[String(projectId)];
   if (remembered) {
-    const memTask = project.tasks.find(
+    const memTask = candidateTasks.find(
       (t) => t.task_id === remembered.task_id
     );
     if (memTask) {
@@ -818,10 +823,9 @@ async function handleSelectProject(
   }
 
   // 2. Check defaultRole (exact or either half of "A - B" titles)
-  if (!taskConfident && project.tasks.length > 1) {
-    const prefs = await loadUserPrefs(userId);
+  if (!taskConfident && candidateTasks.length > 1) {
     if (prefs.defaultRole) {
-      const roleMatch = project.tasks.find(
+      const roleMatch = candidateTasks.find(
         (t) => taskMatchesRole(t.title, prefs.defaultRole!)
       );
       if (roleMatch) {
@@ -920,7 +924,7 @@ async function handleSelectProject(
   }
 
   // 3. If still uncertain and multiple tasks, show task dropdown
-  if (!taskConfident && project.tasks.length > 1) {
+  if (!taskConfident && candidateTasks.length > 1) {
     // Set draft to this project but mark task as uncertain
     convo.drafts[draftIdx] = {
       ...draft,
@@ -950,7 +954,7 @@ async function handleSelectProject(
     const taskIdx = taskUncertainDrafts.indexOf(convo.drafts[draftIdx]);
     const taskBlockId = `task_conf_${taskIdx >= 0 ? taskIdx : 0}`;
 
-    const taskOptions = project.tasks.map((t) => ({
+    const taskOptions = candidateTasks.map((t) => ({
       text: { type: "plain_text" as const, text: t.title.slice(0, 75) },
       value: String(t.task_id),
     }));

@@ -17,6 +17,7 @@ import {
   ActivityType,
   filterActivitiesForProject,
   taskMatchesRole,
+  filterTasksForUser,
 } from "./matcher";
 import { loadActivityMemory } from "./activity-memory";
 import {
@@ -994,7 +995,7 @@ export async function runCopilotSummary(
       : [];
   const matches = [...rememberedMatches, ...aiMatches];
 
-  // 4b. Apply remembered project→task mappings, then default role
+  // 4b. Apply assignment filter, then remembered mappings, then default role
   const projectTaskMem = await loadProjectTaskMemory(slackId);
 
   for (const m of matches) {
@@ -1002,10 +1003,13 @@ export async function runCopilotSummary(
     const project = activeProjects.find((p) => p.project_id === m.project_id);
     if (!project) continue;
 
+    // Narrow to tasks this user is assigned to (falls back to all tasks)
+    const candidateTasks = filterTasksForUser(project.tasks, scoroUserId, project.project_id);
+
     // First: check per-project task memory (user previously picked a task here)
     const remembered = projectTaskMem[String(m.project_id)];
     if (remembered) {
-      const taskStillExists = project.tasks.find(
+      const taskStillExists = candidateTasks.find(
         (t) => t.task_id === remembered.task_id
       );
       if (taskStillExists) {
@@ -1016,9 +1020,9 @@ export async function runCopilotSummary(
       }
     }
 
-    // Second: try defaultRole match (exact or either half of "A - B" titles)
+    // Second: try defaultRole match on the filtered list
     if (prefs.defaultRole) {
-      const roleTask = project.tasks.find(
+      const roleTask = candidateTasks.find(
         (t) => taskMatchesRole(t.title, prefs.defaultRole!)
       );
       if (roleTask) {
@@ -1027,6 +1031,14 @@ export async function runCopilotSummary(
         m.task_confident = true;
         continue;
       }
+    }
+
+    // Third: single assigned task — use it automatically
+    if (candidateTasks.length === 1) {
+      m.task_id = candidateTasks[0].task_id;
+      m.task_title = candidateTasks[0].title;
+      m.task_confident = true;
+      continue;
     }
 
     // No match found: mark as uncertain so the user gets a dropdown

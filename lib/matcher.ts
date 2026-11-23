@@ -243,6 +243,31 @@ export function taskMatchesRole(taskTitle: string, role: string): boolean {
 }
 
 /**
+ * Filter a project's tasks to those where the user is in related_users.
+ * Falls back to the full list when the user isn't assigned to ANY task
+ * on the project (meaning the project doesn't use assignments).
+ */
+export function filterTasksForUser(
+  tasks: TaskRecord[],
+  scoroUserId: number,
+  projectId: number
+): TaskRecord[] {
+  const assigned = tasks.filter((t) =>
+    t.assigned_user_ids.includes(scoroUserId)
+  );
+  if (assigned.length === 0) {
+    console.log(
+      `[task-filter] project ${projectId}: ${tasks.length} tasks, no assignments for user ${scoroUserId}, showing all`
+    );
+    return tasks;
+  }
+  console.log(
+    `[task-filter] project ${projectId}: ${tasks.length} tasks, ${assigned.length} assigned (user ${scoroUserId})`
+  );
+  return assigned;
+}
+
+/**
  * Validate an AI-returned task_id against the real project task list.
  * If the task_id exists, overwrite task_title with the real title.
  * If not, null out both fields so downstream treats it as unmatched.
