@@ -15,7 +15,7 @@ import { PhaseCache } from "@/lib/scoro-phases";
 
 export const maxDuration = 300;
 
-const USER_CONCURRENCY = 5;
+const USER_CONCURRENCY = 8;
 
 // ---------------------------------------------------------------------------
 // Auth failure notification — DM the user, but no more than once per 7 days
